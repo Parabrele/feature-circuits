@@ -96,6 +96,7 @@ def get_circuit(
         node_threshold=0.1,
         edge_threshold=0.01,
 ):
+    resid_only = attns is None or mlps is None
     all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
     
     # first get the patching effect of everything on y
@@ -151,7 +152,6 @@ def get_circuit(
             deltas[upstream],
             return_without_right=True,
         )
-
 
     # now we work backward through the model to get the edges
     for layer in reversed(range(len(resids))):

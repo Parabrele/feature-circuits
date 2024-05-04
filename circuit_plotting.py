@@ -1,4 +1,5 @@
 from graphviz import Digraph
+import networkx as nx
 from collections import defaultdict
 import re
 import os
@@ -16,7 +17,7 @@ def get_name(component, layer, idx):
         case _: raise ValueError(f"Invalid idx: {idx}")
 
 
-def plot_circuit(nodes, edges, layers=6, node_threshold=0.1, edge_threshold=0.01, pen_thickness=1, annotations=None, save_dir='circuit'):
+def plot_circuit(nodes, edges, layers=6, node_threshold=0.1, edge_threshold=0.01, pen_thickness=1, annotations=None, save_dir='circuit', prune=True):
 
     # get min and max node effects
     min_effect = min([v.to_tensor().min() for n, v in nodes.items() if n != 'y'])
@@ -158,6 +159,18 @@ def plot_circuit(nodes, edges, layers=6, node_threshold=0.1, edge_threshold=0.01
                 penwidth=str(abs(weight) * pen_thickness),
                 color = 'red' if weight < 0 else 'blue'
             )
+    
+    if prune:
+        # remove nodes that are not connected to y
+        # convert G to networkx directed graph
+        G_rev = nx.drawing.nx_agraph.to_agraph(G)
+        G_rev = G_rev.reverse()
+        s = "y"
+        reachable = nx.descendants(G_rev, s)
+        reachable.add(s)
+        to_remove = set(G.body) - reachable
+        for node in to_remove:
+            G.body.remove(node)
 
     if not os.path.exists(os.path.dirname(save_dir)):
         os.makedirs(os.path.dirname(save_dir))

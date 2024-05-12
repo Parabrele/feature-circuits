@@ -1,9 +1,11 @@
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import torch as t
 from tqdm import tqdm
 from numpy import ndindex
 from typing import Dict, Union
 from activation_utils import SparseAct
+
+from einops import rearrange
 
 DEBUGGING = False
 
@@ -97,7 +99,31 @@ def _pe_ig(
         steps=10,
         metric_kwargs=dict(),
 ):
+    """
+    In this modified version, the effect is measured from some residual feature f to some other residual feature f' on the next layer.
+    submodules is a list containing, in order, embed, layer[0-n].
+    """
+
+    def unflatten(tensor, b, s, f): # will break if dictionaries vary in size between layers
+        unflattened = rearrange(tensor, '(b s x) -> b s x', b=b, s=s)
+        return SparseAct(act=unflattened[...,:f], res=unflattened[...,f:])
     
+    features_by_submod = {}
+    n_layers = len(model.gpt_neox.layers)
+
+    # TODO
+    nodes = {'y' : None}
+    nodes['embed'] = None
+    for i in range(n_layers):
+        nodes[f'attn_{i}'] = None
+        nodes[f'mlp_{i}'] = None
+        nodes[f'resid_{i}'] = None
+
+        
+    edges = defaultdict(lambda:{})
+    # TODO edges[f'resid_{n_layers-1}'] = { 'y' : effects[resids[-1]].to_tensor().flatten().to_sparse() }
+
+
     # first run through a test input to figure out which hidden states are tuples
     is_tuple = {}
     with model.trace("_"):
@@ -142,16 +168,26 @@ def _pe_ig(
     effects = {}
     deltas = {}
     grads = {}
-    for submodule in submodules:
+    last_layer = True
+    for submodule in reversed(submodules):
         dictionary = dictionaries[submodule]
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
+        if last_layer:
+            downstream_mask = None
+        else:
+            downstream_mask = t.zeros(*downstream_shape)
         with model.trace(**tracer_kwargs) as tracer:
             metrics = []
             fs = []
             for step in range(steps):
                 alpha = step / steps
                 f = (1 - alpha) * clean_state + alpha * patch_state
+                # TODO : this is slower. Try to no_grad everything and enable_grad here # prevent backprop further than the current submodule :
+                # f = SparseAct(
+                #     act=f.act.detach().requires_grad_(True),
+                #     res=f.res.detach().requires_grad_(True)
+                # )
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
@@ -168,13 +204,20 @@ def _pe_ig(
         mean_residual_grad = sum([f.res.grad for f in fs]) / steps
         grad = SparseAct(act=mean_grad, res=mean_residual_grad)
         delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
-        effect = grad @ delta
+        effect = grad @ delta # b s f @ b s f -> b s f
 
-        effects[submodule] = effect
-        deltas[submodule] = delta
-        grads[submodule] = grad
+        if last_layer:
+            edges[f'resid_{n_layers-1}'] = {
+                'y' : effect.to_tensor().flatten().to_sparse()
+            }
+        
+        metric_submod = submodule
+        downstream_feat = (effect.to_tensor().flatten().abs() > node_threshold).nonzero.flatten().tolist()
 
-    return EffectOut(effects, deltas, grads, total_effect)
+
+        last_layer = False
+
+    return TODO
 
 def _pe_exact(
     clean,

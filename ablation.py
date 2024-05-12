@@ -22,6 +22,8 @@ def run_with_ablations(
 
     if patch is None: patch = clean
     patch_states = {}
+    for submodule in submodules:
+        dictionary = dictionaries[submodule]
     with model.trace(patch), t.no_grad():
         for submodule in submodules:
             dictionary = dictionaries[submodule]

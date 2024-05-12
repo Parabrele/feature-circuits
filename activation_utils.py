@@ -220,6 +220,11 @@ class SparseAct():
         if self.resc is None:
             return t.cat([self.act, self.res], dim=-1)
         if self.res is None:
+            # act shape : (batch_size, n_ctx, d_dictionary)
+            # resc shape : (batch_size, n_ctx)
+            # cat needs the same number of dimensions, so use unsqueeze to make the resc shape (batch_size, n_ctx, 1)
+            if self.resc.dim() == self.act.dim() - 1:
+                return t.cat([self.act, self.resc.unsqueeze(-1)], dim=-1)
             return t.cat([self.act, self.resc], dim=-1)
         raise ValueError("SparseAct has both residual and contracted residual. This is an unsupported state.")
 

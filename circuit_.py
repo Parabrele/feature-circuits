@@ -82,6 +82,22 @@ def sparse_mean(x, dim):
 
 ######## end sparse tensor utilities ########
 
+def save_circuit(save_dir, nodes, edges, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
+    save_dict = {
+        "nodes" : nodes,
+        "edges" : edges
+    }
+    save_basename = f"{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}"
+    with open(f'{save_dir}/{save_basename}.pt', 'wb') as outfile:
+        t.save(save_dict, outfile)
+
+def load_circuit(circuit_path):
+    with open(circuit_path, 'rb') as infile:
+        save_dict = t.load(infile)
+    nodes = save_dict['nodes']
+    edges = save_dict['edges']
+    return nodes, edges
+
 def get_circuit(
         clean,
         patch,
@@ -97,6 +113,17 @@ def get_circuit(
 ):
     # TODO : put back the nodes, and their "weight" is now the sum of their contributions, or the max
     #        lets do the max
+
+    """
+    TODO : for module - module, gather all act and patch, and when evaluating all - module, do
+    1-gather all detached
+    2-retain_grad and require_grad
+    3-sum and give that to the module
+    -> should be barely slower than current version, hopefully
+
+    if QK dict, they are only linked to their respective attn head, not anything further.
+    Get a dict for QKV to have the precise decomposition of the effect and then a full attn layer or attn head dict.
+    """
     t_start = time.time()
 
     all_submods = [embed] + [submod for submod in resids]
@@ -172,13 +199,18 @@ def get_circuit(
     delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
     effect = grad @ delta
 
+    tot_eff = effect.to_tensor().sum()
+    effect = effect / tot_eff
+
     n_layers = len(resids)
 
-    nodes = {'y' : total_effect}
-    nodes[f'resid_{n_layers-1}'] = effect.act.shape
+    nodes = {'y' : t.tensor([1])}
+    nodes[f'resid_{n_layers-1}'] = effect
 
     edges = defaultdict(lambda:{})
-    edges[f'resid_{len(resids)-1}'] = { 'y' : effect.to_tensor().flatten().to_sparse() }
+    edges[f'resid_{len(resids)-1}'] = {
+        'y' : effect.to_tensor().flatten().to_sparse()
+    }
 
     features_by_submod = {
         last_layer : (effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
@@ -267,22 +299,25 @@ def get_circuit(
             d_upstream_contracted = t.tensor(upstream_act.act.size())
             d_upstream_contracted[-1] += 1
             d_upstream_contracted = d_upstream_contracted.prod()
-            
-            alive_upstream_features = t.zeros(d_upstream_contracted, dtype=t.bool, device=model.device)
 
+            max_effect = None
             for downstream_feat, fs_grad in zip(downstream_features, fs_grads):
                 grad = fs_grad / steps
                 delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
-                effect = (grad @ delta).to_tensor().flatten()
+                flat_effect = (grad @ delta).to_tensor().flatten()
 
-                effect_indices[downstream_feat] = effect.nonzero().squeeze(-1)
-                effect_values[downstream_feat] = effect[effect_indices[downstream_feat]]
+                effect_indices[downstream_feat] = flat_effect.nonzero().squeeze(-1)
+                effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
+                tot_eff = effect_values[downstream_feat].sum()
+                effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
 
-                alive_for_this_one = (effect_values[downstream_feat].abs() > edge_threshold) # mask of size len(effect_indices[downstream_feat])
-                alive_for_this_one = effect_indices[downstream_feat][alive_for_this_one]
-                alive_upstream_features[alive_for_this_one] = True
+                if max_effect is None:
+                    max_effect = effect / tot_eff
+                else:
+                    max_effect.act = t.where((effect.act / tot_eff).abs() > max_effect.act.abs(), effect.act / tot_eff, max_effect.act)
+                    max_effect.resc = t.where((effect.resc / tot_eff).abs() > max_effect.resc.abs(), effect.resc / tot_eff, max_effect.resc)
 
-            features_by_submod[prev_resid] = alive_upstream_features.nonzero().flatten().tolist()
+            features_by_submod[prev_resid] = (max_effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
 
             # converts the dictionary of indices to a tensor of indices
             effect_indices = t.tensor(
@@ -294,22 +329,22 @@ def get_circuit(
             RR_effect = t.sparse_coo_tensor(effect_indices, effect_values, (d_downstream_contracted, d_upstream_contracted))
     
         if layer > 0:
-            nodes[f'resid_{layer-1}'] = grad.act.shape
+            nodes[f'resid_{layer-1}'] = max_effect
             edges[f'resid_{layer-1}'][f'resid_{layer}'] = RR_effect
         else:
-            nodes['embed'] = grad.act.shape
+            nodes['embed'] = max_effect
             edges['embed'][f'resid_0'] = RR_effect
 
     # rearrange weight matrices
     for child in edges:
         # get shape for child
-        bc, sc, fc = nodes[child]
+        bc, sc, fc = nodes[child].act.shape
         for parent in edges[child]:
             weight_matrix = edges[child][parent]
             if parent == 'y':
                 weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
             else:
-                bp, sp, fp = nodes[parent]
+                bp, sp, fp = nodes[parent].act.shape
                 assert bp == bc
                 weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
             edges[child][parent] = weight_matrix
@@ -324,37 +359,45 @@ def get_circuit(
                 else:
                     weight_matrix = weight_matrix.sum(dim=(1, 4))
                 edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].sum(dim=1)
 
         # aggregate across batch dimension
         for child in edges:
-            bc, _, _ = nodes[child]
+            bc, fc = nodes[child].act.shape
             for parent in edges[child]:
                 weight_matrix = edges[child][parent]
                 if parent == 'y':
                     weight_matrix = weight_matrix.sum(dim=0) / bc
                 else:
-                    bp, _, _ = nodes[parent]
+                    bp, fp = nodes[parent].act.shape
                     assert bp == bc
                     weight_matrix = weight_matrix.sum(dim=(0,2)) / bc
                 edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].mean(dim=0)
     
     elif aggregation == 'none':
 
         # aggregate across batch dimensions
         for child in edges:
             # get shape for child
-            bc, sc, fc = nodes[child]
+            bc, sc, fc = nodes[child].act.shape
             for parent in edges[child]:
                 weight_matrix = edges[child][parent]
                 if parent == 'y':
                     weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
                     weight_matrix = weight_matrix.sum(dim=0) / bc
                 else:
-                    bp, sp, fp = nodes[parent]
+                    bp, sp, fp = nodes[parent].act.shape
                     assert bp == bc
                     weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
                     weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
                 edges[child][parent] = weight_matrix
+        for node in nodes:
+            nodes[node] = nodes[node].mean(dim=0)
 
     else:
         raise ValueError(f"Unknown aggregation: {aggregation}")

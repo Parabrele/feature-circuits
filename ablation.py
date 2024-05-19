@@ -65,6 +65,110 @@ def run_with_ablations(
         metric = metric_fn(model, **metric_kwargs).save()
     return metric.value
 
+# TODO : use accuracy/rank instead ?
+
+# get m(C) for the circuit obtained by thresholding nodes with the given threshold
+def get_fcs(
+    model,
+    clean,
+    patch,
+    clean_trg_idx,
+    patch_trg_idx,
+    circuit,
+    submodules,
+    dictionaries,
+    ablation_fn,
+    thresholds,
+    device='cpu',
+    handle_errors = 'default', # also 'remove' or 'resid_only'
+):
+    clean_inputs = clean
+    clean_answer_idxs = clean_trg_idx
+    patch_inputs = patch
+    patch_answer_idxs = patch_trg_idx
+
+    if patch is not None:
+        def metric_fn(model):
+            return (
+                - t.gather(model.embed_out.output[:,-1,:], dim=-1, index=patch_answer_idxs.view(-1, 1)).squeeze(-1) + \
+                t.gather(model.embed_out.output[:,-1,:], dim=-1, index=clean_answer_idxs.view(-1, 1)).squeeze(-1)
+            )
+    else:
+        def metric_fn(model):
+            return (
+                t.gather(model.embed_out.output[:,-1,:], dim=-1, index=clean_answer_idxs.view(-1, 1)).squeeze(-1)
+            )
+    
+    circuit = circuit[0]
+
+    with t.no_grad():
+        out = {}
+
+        # get F(M)
+        with model.trace(clean_inputs):
+            metric = metric_fn(model).save()
+        fm = metric.value.mean().item()
+
+        out['fm'] = fm
+
+        # get m(∅)
+        fempty = run_with_ablations(
+            clean_inputs,
+            patch_inputs,
+            model,
+            submodules,
+            dictionaries,
+            nodes = {
+                submod : SparseAct(
+                    act=t.zeros(dict_size, dtype=t.bool), 
+                    resc=t.zeros(1, dtype=t.bool)).to(device)
+                for submod in submodules
+            },
+            metric_fn=metric_fn,
+            ablation_fn=ablation_fn,
+        ).mean().item()
+        out['fempty'] = fempty
+
+        for threshold in thresholds:
+            out[threshold] = {}
+            nodes = {
+                submod : circuit[submod_names[submod]].abs() > threshold for submod in submodules
+            }
+
+            if handle_errors == 'remove':
+                for k in nodes: nodes[k].resc = t.zeros_like(nodes[k].resc, dtype=t.bool)
+            elif handle_errors == 'resid_only':
+                for k in nodes:
+                    if k not in model.gpt_neox.layers: nodes[k].resc = t.zeros_like(nodes[k].resc, dtype=t.bool)
+
+            n_nodes = sum([n.act.sum() + n.resc.sum() for n in nodes.values()]).item()
+            out[threshold]['n_nodes'] = n_nodes
+            
+            out[threshold]['fc'] = run_with_ablations(
+                clean_inputs,
+                patch_inputs,
+                model,
+                submodules,
+                dictionaries,
+                nodes=nodes,
+                metric_fn=metric_fn,
+                ablation_fn=ablation_fn,
+            ).mean().item()
+            out[threshold]['fccomp'] = run_with_ablations(
+                clean_inputs,
+                patch_inputs,
+                model,
+                submodules,
+                dictionaries,
+                nodes=nodes,
+                metric_fn=metric_fn,
+                ablation_fn=ablation_fn,
+                complement=True
+            ).mean().item()
+            out[threshold]['faithfulness'] = (out[threshold]['fc'] - fempty) / (fm - fempty)
+            out[threshold]['completeness'] = (out[threshold]['fccomp'] - fempty) / (fm - fempty)
+    
+    return out
 
 if __name__ == '__main__':
     parser = ArgumentParser()

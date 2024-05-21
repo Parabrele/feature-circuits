@@ -9,13 +9,12 @@ import torch as t
 from einops import rearrange
 from tqdm import tqdm
 
-from activation_utils import SparseAct
+from utils import SparseAct, load_examples, load_examples_nopair, plot_circuit, plot_circuit_posaligned
 from attribution import patching_effect, jvp
-from circuit_plotting import plot_circuit, plot_circuit_posaligned
 from dictionary_learning import AutoEncoder
-from loading_utils import load_examples, load_examples_nopair
 from nnsight import LanguageModel
 
+tracer_kwargs = {'validate' : False, 'scan' : False}
 
 ###### utilities for dealing with sparse COO tensors ######
 def flatten_index(idxs, shape):
@@ -79,8 +78,379 @@ def sparse_mean(x, dim):
 
 ######## end sparse tensor utilities ########
 
+def save_circuit(save_dir, nodes, edges, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
+    save_dict = {
+        "nodes" : dict(nodes),
+        "edges" : dict(edges)
+    }
+    save_basename = f"{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}"
+
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    with open(f'{save_dir}{save_basename}.pt', 'wb') as outfile:
+        t.save(save_dict, outfile)
+
+def load_circuit(save_dir, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
+    path = f'{save_dir}{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}.pt'
+    return load_from(path)
+
+def load_from(circuit_path):
+    with open(circuit_path, 'rb') as infile:
+        save_dict = t.load(infile)
+    nodes = save_dict['nodes']
+    edges = save_dict['edges']
+    return nodes, edges
 
 def get_circuit(
+    clean,
+    patch,
+    model,
+    dictionaries,
+    metric_fn,
+    embed,
+    resids,
+    attns=None,
+    mlps=None,
+    metric_kwargs=dict(),
+    original_marks=True, # whether to compute the circuit using the original marks method
+    normalise_edges=False, # whether to divide the edges entering a node by their sum
+    use_start_at_layer=False, # Whether to compute the layer-wise effects with the start at layer argument to save computation
+    aggregation='sum', # or 'none' for not aggregating across sequence position
+    node_threshold=0.1,
+    edge_threshold=0.01,
+    steps=10,
+    nodes_only=False,
+):
+    if original_marks :
+        if (attns is None or mlps is None):
+            raise ValueError("Original marks method requires attns and mlps to be provided")
+        else:
+            return get_circuit_marks(
+                clean,
+                patch,
+                model,
+                embed,
+                attns,
+                mlps,
+                resids,
+                dictionaries,
+                metric_fn,
+                metric_kwargs=metric_kwargs,
+                aggregation=aggregation,
+                nodes_only=nodes_only,
+                node_threshold=node_threshold,
+                edge_threshold=edge_threshold,
+            )
+    else:
+        return get_circuit_resid_only(
+            clean,
+            patch,
+            model,
+            embed,
+            resids,
+            dictionaries,
+            metric_fn,
+            metric_kwargs=metric_kwargs,
+            normalise_edges=normalise_edges,
+            use_start_at_layer=use_start_at_layer,
+            aggregation=aggregation,
+            edge_threshold=edge_threshold,
+            steps=steps,
+        )
+
+def get_circuit_resid_only(
+        clean,
+        patch,
+        model,
+        embed,
+        resids,
+        dictionaries,
+        metric_fn,
+        metric_kwargs=dict(),
+        normalise_edges=False, # whether to divide the edges entering a node by their sum
+        use_start_at_layer=False, # Whether to compute the layer-wise effects with the start at layer argument to save computation
+        aggregation='sum', # or 'none' for not aggregating across sequence position
+        edge_threshold=0.01,
+        steps=10,
+):
+    all_submods = [embed] + [submod for submod in resids]
+    
+    # dummy forward pass to get shapes of outputs
+    is_tuple = {}
+    with model.trace("_"), t.no_grad():
+        for submodule in all_submods:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
+
+    if use_start_at_layer:
+        raise NotImplementedError
+    
+    # get encoding and reconstruction errors for clean and patch
+    hidden_states_clean = {}
+    with model.trace(clean, **tracer_kwargs), t.no_grad():
+        for submodule in all_submods:
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+            upstream_act = dictionary.encode(x)
+            x_hat = dictionary.decode(upstream_act)
+            residual = x - x_hat
+            hidden_states_clean[submodule] = SparseAct(act=upstream_act.save(), res=residual.save())
+    hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
+
+    if patch is None:
+        hidden_states_patch = {
+            k : SparseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
+        }
+    else:
+        hidden_states_patch = {}
+        with model.trace(patch, **tracer_kwargs), t.no_grad():
+            for submodule in all_submods:
+                dictionary = dictionaries[submodule]
+                x = submodule.output
+                if is_tuple[submodule]:
+                    x = x[0]
+                upstream_act = dictionary.encode(x)
+                x_hat = dictionary.decode(upstream_act)
+                residual = x - x_hat
+                hidden_states_patch[submodule] = SparseAct(act=upstream_act.save(), res=residual.save())
+        hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
+
+    # start by the effect of the last layer to the metric
+    last_layer = all_submods[-1]
+    dictionary = dictionaries[last_layer]
+    clean_state = hidden_states_clean[last_layer]
+    patch_state = hidden_states_patch[last_layer]
+    with model.trace(**tracer_kwargs) as tracer:
+        metrics = []
+        fs = []
+        for step in range(steps):
+            alpha = step / steps
+            upstream_act = (1 - alpha) * clean_state + alpha * patch_state
+            upstream_act.act.retain_grad()
+            upstream_act.res.retain_grad()
+            fs.append(upstream_act)
+            with tracer.invoke(clean, scan=tracer_kwargs['scan']):
+                if is_tuple[last_layer]:
+                    last_layer.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
+                else:
+                    last_layer.output = dictionary.decode(upstream_act.act) + upstream_act.res
+                metrics.append(metric_fn(model, **metric_kwargs))
+        metric = sum([m for m in metrics])
+        metric.sum().backward(retain_graph=True)
+
+    mean_grad = sum([f.act.grad for f in fs]) / steps
+    mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+    grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+    delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+    effect = grad @ delta
+    
+    if normalise_edges:
+        tot_eff = effect.to_tensor().sum()
+        effect = effect / tot_eff
+
+    n_layers = len(resids)
+
+    nodes = {'y' : t.tensor([1.0]).to(effect.act.device)}
+    nodes[f'resid_{n_layers-1}'] = effect
+
+    edges = defaultdict(lambda:{})
+    edges[f'resid_{len(resids)-1}'] = {
+        'y' : effect.to_tensor().flatten().to_sparse()
+    }
+
+    features_by_submod = {
+        last_layer : (effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
+    }
+
+    # Now, backward through the model to get the effects of each layer on its successor.
+
+    # now we work backward through the model to get the edges
+    for layer in reversed(range(n_layers)):
+        
+        resid = resids[layer]
+        if layer > 0:
+            prev_resid = resids[layer-1]
+        else:
+            prev_resid = embed
+        
+        downstream_submod = resid
+        upstream_submod = prev_resid
+
+        downstream_features = features_by_submod[downstream_submod]
+
+        if not features_by_submod[resid]: # handle empty list
+            features_by_submod[prev_resid] = []
+            RR_effect = t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(model.device)
+            break
+        
+        else:
+            downstream_dict = dictionaries[downstream_submod]
+            
+            effect_indices = {}
+            effect_values = {}
+            dictionary = dictionaries[prev_resid]
+            clean_state = hidden_states_clean[prev_resid]
+            patch_state = hidden_states_patch[prev_resid]
+
+            fs_grads = [0 for _ in range(len(downstream_features))]
+            
+            for step in range(steps):
+                alpha = step / steps
+                upstream_act = (1 - alpha) * clean_state + alpha * patch_state
+                upstream_act.act.retain_grad()
+                upstream_act.res.retain_grad()
+                
+                with model.trace(clean, **tracer_kwargs):
+                    if is_tuple[upstream_submod]:
+                        upstream_submod.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
+                    else:
+                        upstream_submod.output = dictionary.decode(upstream_act.act) + upstream_act.res
+                    
+                    y = downstream_submod.output
+                    if is_tuple[downstream_submod]:
+                        y = y[0]
+                    y_hat, g = downstream_dict(y, output_features=True)
+                    y_res = y - y_hat
+                    # the left @ down in the original code was at least useful to populate .resc instead of .res. I should just du .resc = norm of .res :
+                    # all values represent the norm of their respective feature, so if we consider .res as a feature, then we should indeed
+                    # consider its norm as the node.
+                    # /!\ do the .to_tensor().flatten() outside of the with in order for the proxies to be populated and .to_tensor() to not crash
+                    downstream_act = SparseAct(
+                        act=g,
+                        resc=t.norm(y_res, dim=-1)
+                    ).save()
+                
+                downstream_act = downstream_act.to_tensor().flatten()
+                
+                for i, downstream_feat in enumerate(downstream_features):
+                    downstream_act[downstream_feat].backward(retain_graph=True)
+                    fs_grads[i] += SparseAct(
+                        act=upstream_act.act.grad,
+                        res=upstream_act.res.grad
+                    )
+                    upstream_act.act.grad = t.zeros_like(upstream_act.act)
+                    upstream_act.res.grad = t.zeros_like(upstream_act.res)
+
+            # get shapes
+            d_downstream_contracted = t.tensor(hidden_states_clean[resid].act.size())
+            d_downstream_contracted[-1] += 1
+            d_downstream_contracted = d_downstream_contracted.prod()
+            
+            d_upstream_contracted = t.tensor(upstream_act.act.size())
+            d_upstream_contracted[-1] += 1
+            d_upstream_contracted = d_upstream_contracted.prod()
+            
+            max_effect = None
+            for downstream_feat, fs_grad in zip(downstream_features, fs_grads):
+                grad = fs_grad / steps
+                delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+                effect = grad @ delta
+                flat_effect = effect.to_tensor().flatten()
+
+                effect_indices[downstream_feat] = flat_effect.nonzero().squeeze(-1)
+                effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
+                
+                if normalise_edges:
+                    tot_eff = effect_values[downstream_feat].sum()
+                    effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
+                    effect = effect / tot_eff
+
+                if max_effect is None:
+                    max_effect = effect
+                else:
+                    max_effect.act = t.where((effect.act / tot_eff).abs() > max_effect.act.abs(), effect.act / tot_eff, max_effect.act)
+                    max_effect.resc = t.where((effect.resc / tot_eff).abs() > max_effect.resc.abs(), effect.resc / tot_eff, max_effect.resc)
+
+            features_by_submod[prev_resid] = (max_effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
+
+            # converts the dictionary of indices to a tensor of indices
+            effect_indices = t.tensor(
+                [[downstream_feat for downstream_feat in downstream_features for _ in effect_indices[downstream_feat]],
+                t.cat([effect_indices[downstream_feat] for downstream_feat in downstream_features], dim=0)]
+            ).to(model.device)
+            effect_values = t.cat([effect_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
+
+            RR_effect = t.sparse_coo_tensor(effect_indices, effect_values, (d_downstream_contracted, d_upstream_contracted))
+    
+        if layer > 0:
+            nodes[f'resid_{layer-1}'] = max_effect
+            edges[f'resid_{layer-1}'][f'resid_{layer}'] = RR_effect
+        else:
+            nodes['embed'] = max_effect
+            edges['embed'][f'resid_0'] = RR_effect
+
+    # rearrange weight matrices
+    for child in edges:
+        # get shape for child
+        bc, sc, fc = nodes[child].act.shape
+        for parent in edges[child]:
+            weight_matrix = edges[child][parent]
+            if parent == 'y':
+                weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+            else:
+                bp, sp, fp = nodes[parent].act.shape
+                assert bp == bc
+                weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+            edges[child][parent] = weight_matrix
+    
+    if aggregation == 'sum':
+        # aggregate across sequence position
+        for child in edges:
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = weight_matrix.sum(dim=1)
+                else:
+                    weight_matrix = weight_matrix.sum(dim=(1, 4))
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].sum(dim=1)
+
+        # aggregate across batch dimension
+        for child in edges:
+            bc, fc = nodes[child].act.shape
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = weight_matrix.sum(dim=0) / bc
+                else:
+                    bp, fp = nodes[parent].act.shape
+                    assert bp == bc
+                    weight_matrix = weight_matrix.sum(dim=(0,2)) / bc
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].mean(dim=0)
+    
+    elif aggregation == 'none':
+
+        # aggregate across batch dimensions
+        for child in edges:
+            # get shape for child
+            bc, sc, fc = nodes[child].act.shape
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+                    weight_matrix = weight_matrix.sum(dim=0) / bc
+                else:
+                    bp, sp, fp = nodes[parent].act.shape
+                    assert bp == bc
+                    weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+                    weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            nodes[node] = nodes[node].mean(dim=0)
+
+    else:
+        raise ValueError(f"Unknown aggregation: {aggregation}")
+
+    return nodes, edges
+
+def get_circuit_marks(
         clean,
         patch,
         model,
@@ -275,6 +645,320 @@ def get_circuit(
 
     return nodes, edges
 
+def get_circuit_stop_at_layer(
+        clean,
+        patch,
+        model,
+        embed,
+        resids,
+        dictionaries,
+        metric_fn,
+        metric_kwargs=dict(),
+        aggregation='sum', # or 'none' for not aggregating across sequence position
+        edge_threshold=0.01,
+        steps=10,
+):
+    """
+    TODO :
+    Integrate into get circuit.
+    The loop with model.trace and then tracer.invoke will need reworking.
+    """
+
+    n_layers = len(resids)
+
+    all_submods = [embed] + [submod for submod in resids]
+    
+    # dummy forward pass to get shapes of outputs
+    is_tuple = {}
+    with model.trace("_"), t.no_grad():
+        for submodule in all_submods:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
+
+    _, _, _, attn_mask = model.input_to_embed(clean)
+    # get encoding and reconstruction errors for clean and patch
+    hidden_states_clean = {}
+    with model.trace(clean, **tracer_kwargs), t.no_grad():
+        for submodule in all_submods:
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+            upstream_act = dictionary.encode(x)
+            x_hat = dictionary.decode(upstream_act)
+            residual = x - x_hat
+            hidden_states_clean[submodule] = SparseAct(act=upstream_act.save(), res=residual.save())
+        metric_clean = metric_fn(model, **metric_kwargs).save()
+    hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
+
+    if patch is None:
+        hidden_states_patch = {
+            k : SparseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
+        }
+        total_effect = None
+    else:
+        hidden_states_patch = {}
+        with model.trace(patch, **tracer_kwargs), t.no_grad():
+            for submodule in all_submods:
+                dictionary = dictionaries[submodule]
+                x = submodule.output
+                if is_tuple[submodule]:
+                    x = x[0]
+                upstream_act = dictionary.encode(x)
+                x_hat = dictionary.decode(upstream_act)
+                residual = x - x_hat
+                hidden_states_patch[submodule] = SparseAct(act=upstream_act.save(), res=residual.save())
+            metric_patch = metric_fn(model, **metric_kwargs).save()
+        total_effect = (metric_patch.value - metric_clean.value).detach()
+        hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
+
+    # start by the effect of the last layer to the metric
+    last_layer = all_submods[-1]
+
+    dictionary = dictionaries[last_layer]
+    clean_state = hidden_states_clean[last_layer]
+    patch_state = hidden_states_patch[last_layer]
+
+    metrics = []
+    fs = []
+
+    # TODO : tracer.invoke batches all the calls automatically. Using start_at_layer is not compatible using .invoke : batch the calls manually and do only one model.trace
+    for step in range(steps):
+        alpha = step / steps
+
+        upstream_act = (1 - alpha) * clean_state + alpha * patch_state
+        upstream_act.act.retain_grad()
+        upstream_act.res.retain_grad()
+
+        fs.append(upstream_act)
+
+        intervention = dictionary.decode(upstream_act.act) + upstream_act.res
+        with model.trace(
+            t.zeros_like(intervention),
+            start_at_layer=n_layers-1,
+            attention_mask=attn_mask,
+            **tracer_kwargs
+        ):
+            if is_tuple[last_layer]:
+                last_layer.output[0][:] = intervention
+            else:
+                last_layer.output = intervention
+
+            metrics.append(metric_fn(model, **metric_kwargs).save())
+    metric = sum([m for m in metrics])
+    metric.sum().backward(retain_graph=True)
+
+    mean_grad = sum([f.act.grad for f in fs]) / steps
+    mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+    grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+    delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+    effect = grad @ delta
+
+    tot_eff = effect.to_tensor().sum()
+    effect = effect / tot_eff
+
+    nodes = {'y' : t.tensor([1])}
+    nodes[f'resid_{n_layers-1}'] = effect
+
+    edges = defaultdict(lambda:{})
+    edges[f'resid_{len(resids)-1}'] = {
+        'y' : effect.to_tensor().flatten().to_sparse()
+    }
+
+    features_by_submod = {
+        last_layer : (effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
+    }
+
+    # Now, backward through the model to get the effects of each layer on its successor.
+
+    # now we work backward through the model to get the edges
+    for layer in reversed(range(n_layers)):
+        
+        resid = resids[layer]
+        if layer > 0:
+            prev_resid = resids[layer-1]
+        else:
+            prev_resid = embed
+        
+        downstream_submod = resid
+        upstream_submod = prev_resid
+
+        downstream_features = features_by_submod[downstream_submod]
+
+        if not features_by_submod[resid]: # handle empty list
+            features_by_submod[prev_resid] = []
+            RR_effect = t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(model.cfg.device)
+            break
+        
+        else:
+            downstream_dict, upstream_dict = dictionaries[downstream_submod], dictionaries[upstream_submod]
+
+            effect_indices = {}
+            effect_values = {}
+            dictionary = dictionaries[prev_resid]
+            clean_state = hidden_states_clean[prev_resid]
+            patch_state = hidden_states_patch[prev_resid]
+
+            fs_grads = [0 for _ in range(len(downstream_features))]
+            
+            for step in range(steps):
+                alpha = step / steps
+                upstream_act = (1 - alpha) * clean_state + alpha * patch_state
+                upstream_act.act.retain_grad()
+                upstream_act.res.retain_grad()
+
+                intervention = dictionary.decode(upstream_act.act) + upstream_act.res
+
+                start_layer = layer - 1 if layer > 0 else None 
+                with model.trace(
+                    t.zeros_like(intervention),
+                    start_at_layer=start_layer,
+                    stop_at_layer=layer+1,
+                    attention_mask=attn_mask,
+                    **tracer_kwargs
+                ):
+                    if is_tuple[upstream_submod]:
+                        upstream_submod.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
+                    else:
+                        upstream_submod.output = dictionary.decode(upstream_act.act) + upstream_act.res
+
+
+                    y = downstream_submod.output
+                    if is_tuple[downstream_submod]:
+                        y = y[0]
+                    y_hat, g = downstream_dict(y, output_features=True)
+                    y_res = y - y_hat
+                    # the left @ down in the original code was at least useful to populate .resc instead of .res. I should just du .resc = norm of .res :
+                    # all values represent the norm of their respective feature, so if we consider .res as a feature, then we should indeed
+                    # consider its norm as the node.
+                    # /!\ do the .to_tensor().flatten() outside of the with in order for the proxies to be populated and .to_tensor() to not crash
+                    downstream_act = SparseAct(
+                        act=g,
+                        resc=t.norm(y_res, dim=-1)
+                    ).save()
+                
+                downstream_act = downstream_act.to_tensor().flatten()
+                
+                for i, downstream_feat in enumerate(downstream_features):
+                    upstream_act.act.grad = t.zeros_like(upstream_act.act)
+                    upstream_act.res.grad = t.zeros_like(upstream_act.res)
+                    downstream_act[downstream_feat].backward(retain_graph=True)
+                    fs_grads[i] += SparseAct(
+                        act=upstream_act.act.grad,
+                        res=upstream_act.res.grad
+                    )
+
+            # get shapes
+            d_downstream_contracted = t.tensor(hidden_states_clean[resid].act.size())
+            d_downstream_contracted[-1] += 1
+            d_downstream_contracted = d_downstream_contracted.prod()
+            
+            d_upstream_contracted = t.tensor(upstream_act.act.size())
+            d_upstream_contracted[-1] += 1
+            d_upstream_contracted = d_upstream_contracted.prod()
+
+            max_effect = None
+            for downstream_feat, fs_grad in zip(downstream_features, fs_grads):
+                grad = fs_grad / steps
+                delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+                flat_effect = (grad @ delta).to_tensor().flatten()
+
+                effect_indices[downstream_feat] = flat_effect.nonzero().squeeze(-1)
+                effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
+                tot_eff = effect_values[downstream_feat].sum()
+                effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
+
+                if max_effect is None:
+                    max_effect = effect / tot_eff
+                else:
+                    max_effect.act = t.where((effect.act / tot_eff).abs() > max_effect.act.abs(), effect.act / tot_eff, max_effect.act)
+                    max_effect.resc = t.where((effect.resc / tot_eff).abs() > max_effect.resc.abs(), effect.resc / tot_eff, max_effect.resc)
+
+            features_by_submod[prev_resid] = (max_effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
+
+            # converts the dictionary of indices to a tensor of indices
+            effect_indices = t.tensor(
+                [[downstream_feat for downstream_feat in downstream_features for _ in effect_indices[downstream_feat]],
+                t.cat([effect_indices[downstream_feat] for downstream_feat in downstream_features], dim=0)]
+            ).to(model.cfg.device)
+            effect_values = t.cat([effect_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
+
+            RR_effect = t.sparse_coo_tensor(effect_indices, effect_values, (d_downstream_contracted, d_upstream_contracted))
+    
+        if layer > 0:
+            nodes[f'resid_{layer-1}'] = max_effect
+            edges[f'resid_{layer-1}'][f'resid_{layer}'] = RR_effect
+        else:
+            nodes['embed'] = max_effect
+            edges['embed'][f'resid_0'] = RR_effect
+
+    # rearrange weight matrices
+    for child in edges:
+        # get shape for child
+        bc, sc, fc = nodes[child].act.shape
+        for parent in edges[child]:
+            weight_matrix = edges[child][parent]
+            if parent == 'y':
+                weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+            else:
+                bp, sp, fp = nodes[parent].act.shape
+                assert bp == bc
+                weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+            edges[child][parent] = weight_matrix
+    
+    if aggregation == 'sum':
+        # aggregate across sequence position
+        for child in edges:
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = weight_matrix.sum(dim=1)
+                else:
+                    weight_matrix = weight_matrix.sum(dim=(1, 4))
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].sum(dim=1)
+
+        # aggregate across batch dimension
+        for child in edges:
+            bc, fc = nodes[child].act.shape
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = weight_matrix.sum(dim=0) / bc
+                else:
+                    bp, fp = nodes[parent].act.shape
+                    assert bp == bc
+                    weight_matrix = weight_matrix.sum(dim=(0,2)) / bc
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].mean(dim=0)
+    
+    elif aggregation == 'none':
+
+        # aggregate across batch dimensions
+        for child in edges:
+            # get shape for child
+            bc, sc, fc = nodes[child].act.shape
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+                    weight_matrix = weight_matrix.sum(dim=0) / bc
+                else:
+                    bp, sp, fp = nodes[parent].act.shape
+                    assert bp == bc
+                    weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+                    weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            nodes[node] = nodes[node].mean(dim=0)
+
+    else:
+        raise ValueError(f"Unknown aggregation: {aggregation}")
+
+    return nodes, edges
 
 def get_circuit_cluster(dataset,
                         model_name="EleutherAI/pythia-70m-deduped",
@@ -408,7 +1092,6 @@ def get_circuit_cluster(dataset,
         pen_thickness=1, 
         annotations=annotations, 
         save_dir=os.path.join(plot_dir, save_basename))
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

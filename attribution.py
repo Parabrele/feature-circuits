@@ -3,7 +3,7 @@ import torch as t
 from tqdm import tqdm
 from numpy import ndindex
 from typing import Dict, Union
-from activation_utils import SparseAct
+from utils import SparseAct
 
 DEBUGGING = False
 

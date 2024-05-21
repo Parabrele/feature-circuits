@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from loading_utils import load_examples
+from utils import load_examples
 from attribution import patching_effect
 from nnsight import LanguageModel
 from dictionary_learning import AutoEncoder

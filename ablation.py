@@ -3,8 +3,7 @@ import torch as t
 from dictionary_learning import AutoEncoder
 from dictionary_learning.dictionary import IdentityDict
 from argparse import ArgumentParser
-from activation_utils import SparseAct
-from loading_utils import load_examples
+from utils import SparseAct, load_examples
 
 def run_with_ablations(
         clean, # clean inputs
@@ -33,7 +32,6 @@ def run_with_ablations(
             x_hat, f = dictionary(x, output_features=True)
             patch_states[submodule] = SparseAct(act=f, res=x - x_hat).save()
     patch_states = {k : ablation_fn(v.value) for k, v in patch_states.items()}
-
 
     with model.trace(clean), t.no_grad():
         for submodule in submodules:

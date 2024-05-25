@@ -221,6 +221,15 @@ class SparseAct():
         self.act = self.act.detach()
         self.res = self.res.detach()
         return SparseAct(act=self.act, res=self.res)
+
+    @staticmethod
+    def zeros_like(other):
+        kwargs = {}
+        for attr in ['act', 'res', 'resc']:
+            if getattr(other, attr) is not None:
+                kwargs[attr] = t.zeros_like(getattr(other, attr))
+        return SparseAct(**kwargs)
+
     
     def to_tensor(self):
         if self.resc is None:

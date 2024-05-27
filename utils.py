@@ -1,3 +1,4 @@
+from __future__ import annotations
 from graphviz import Digraph
 from collections import defaultdict
 import os
@@ -6,7 +7,6 @@ import random
 import torch as t
 import torch.nn.functional as F
 from dataclasses import dataclass
-from __future__ import annotations
 from torchtyping import TensorType
 
 class SparseAct():

@@ -347,7 +347,7 @@ def faithfulness(
 ##########
 
 @torch.no_grad()
-def to_Digraph(circuit, discard_res=False):
+def to_Digraph(circuit, discard_res=False, discard_y=False):
     """
     circuit : tuple (nodes, edges) or nk.Graph
     returns a networkx DiGraph
@@ -363,7 +363,23 @@ def to_Digraph(circuit, discard_res=False):
 
         for upstream in edges:
             for downstream in edges[upstream]:
-                for d, u in edges[upstream][downstream].coalesce().indices():
+                print(upstream, downstream)
+                print(edges[upstream][downstream].coalesce().indices().shape)
+                print(edges[upstream][downstream].shape)
+                if downstream == 'y':
+                    if discard_y:
+                        continue
+                    else:
+                        for u in edges[upstream][downstream].coalesce().indices().t():
+                            u = u.item()
+                            if discard_res and u == edges[upstream][downstream].size(0) - 1:
+                                continue
+                            upstream_name = f"{upstream}_{u}"
+                            G.add_edge(upstream_name, downstream)
+                        continue
+                for d, u in edges[upstream][downstream].coalesce().indices().t():
+                    d = d.item()
+                    u = u.item()
                     # this weight matrix has shape (f_down + 1, f_up + 1)
                     # reconstruction error nodes are the last ones
                     if discard_res and (
@@ -399,37 +415,31 @@ def prune(
 
     # save the 'embed' nodes and their edges to restore them later
     save = []
+    to_relabel = {}
     for node in G.nodes:
-        if False:# TODO
+        if 'embed' in node:
             save += G.edges(node)
+            to_relabel[node] = 'embed'
 
     # merge nodes from embedding into a single 'embed' node, like 'y' is single.
-    to_relable = {}
-    for node in G.nodes:
-        if False:# TODO
-            to_relable[node] = 'embed'
-    G = nx.relabel_nodes(G, to_relable)
+    G = nx.relabel_nodes(G, to_relabel)
 
     # do reachability from v -> 'y' for all v, remove all nodes that are not reachable
     reachable = nx.ancestors(G, 'y')
     reachable.add('y')
-
     complement = set(G.nodes) - reachable
 
     G.remove_nodes_from(complement)
 
-    # do reachability from 'embed' -> v for all v, remove all nodes that are not reachable
-    reachable = nx.descendants(G, 'embed')
-    reachable.add('embed')
+    # # do reachability from 'embed' -> v for all v, remove all nodes that are not reachable
+    # reachable = nx.descendants(G, 'embed')
+    # complement = set(G.nodes) - reachable
 
-    complement = set(G.nodes) - reachable
-
-    G.remove_nodes_from(complement)
+    # G.remove_nodes_from(complement)
 
     # untangle the 'embed' node into its original nodes and return the new graph
     G.remove_node('embed')
-    for edge in save['edges']:
-        G.add_edge(edge)
+    G.add_edges_from(save)
 
     if return_tuple:
         return to_tuple(G)
@@ -441,6 +451,9 @@ def get_avg_degree(G):
 def get_connected_components(G):
     if isinstance(G, nx.DiGraph):
         G = G.to_undirected()
+
+    G = G.copy()
+    G.remove_node('y')
     return nx.number_connected_components(G)
 
 def get_density(G):
@@ -496,10 +509,9 @@ def sparsity(
         'avgdegree' : get_avg_degree(G),
         'connected_components' : get_connected_components(G),
         'density' : get_density(G),
-        'global_clustering_coefficient' : get_global_clustering_coefficient(G),
-        'transitivity' : get_transitivity(G),
+        # 'global_clustering_coefficient' : get_global_clustering_coefficient(G),
+        # 'transitivity' : get_transitivity(G),
         'degree_distribution' : get_degree_distribution(G),
-        's_metric' : get_s_metric(G),
     }
 
     if prune:

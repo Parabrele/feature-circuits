@@ -9,6 +9,17 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from torchtyping import TensorType
 
+DEBUGGING = False
+
+if DEBUGGING:
+    tracer_kwargs = {'validate' : True, 'scan' : True}
+else:
+    tracer_kwargs = {'validate' : False, 'scan' : False}
+
+##########
+# SparseAct
+##########
+
 class SparseAct():
     """
     A SparseAct is a helper class which represents a vector in the sparse feature basis provided by an SAE, jointly with the SAE error term.
@@ -160,6 +171,13 @@ class SparseAct():
         else:
             raise ValueError("SparseAct has both residual and contracted residual. This is an unsupported state.")
     
+    def amax(self, dim=None):
+        kwargs = {}
+        for attr in ['act', 'res', 'resc']:
+            if getattr(self, attr) is not None:
+                kwargs[attr] = getattr(self, attr).amax(dim)
+        return SparseAct(**kwargs)
+
     def sum(self, dim=None):
         kwargs = {}
         for attr in ['act', 'res', 'resc']:
@@ -276,6 +294,10 @@ class SparseAct():
     def abs(self):
         return self._map(lambda x, _: x.abs())
 
+##########
+# Circuit plotting
+##########
+
 def get_name(component, layer, idx):
     match idx:
         case (seq, feat):
@@ -287,7 +309,6 @@ def get_name(component, layer, idx):
             if layer == -1: return f'embed/{feat}'
             return f'{component}_{layer}/{feat}'
         case _: raise ValueError(f"Invalid idx: {idx}")
-
 
 def plot_circuit(nodes, edges, layers=6, node_threshold=0.1, edge_threshold=0.01, pen_thickness=1, annotations=None, save_dir='circuit'):
     """
@@ -440,7 +461,6 @@ def plot_circuit(nodes, edges, layers=6, node_threshold=0.1, edge_threshold=0.01
     if not os.path.exists(os.path.dirname(save_dir)):
         os.makedirs(os.path.dirname(save_dir))
     G.render(save_dir, format='png', cleanup=True)
-
 
 def plot_circuit_posaligned(nodes, edges, layers=6, length=6, example_text="The managers that the parent likes",
                             node_threshold=0.1, edge_threshold=0.01, pen_thickness=3, annotations=None, save_dir='circuit'):
@@ -613,6 +633,10 @@ def plot_circuit_posaligned(nodes, edges, layers=6, length=6, example_text="The 
         os.makedirs(os.path.dirname(save_dir))
     G.render(save_dir, format='png', cleanup=True)
 
+##########
+# Wtf is this?
+##########
+
 @dataclass
 class DictionaryCfg():
     def __init__(
@@ -622,7 +646,6 @@ class DictionaryCfg():
         ) -> None:
         self.dir = dictionary_dir
         self.size = dictionary_size
-
 
 def load_examples(dataset, num_examples, model, seed=12, pad_to_length=None, length=None):
     examples = []
@@ -670,7 +693,6 @@ def load_examples(dataset, num_examples, model, seed=12, pad_to_length=None, len
             break
 
     return examples
-
 
 def load_examples_nopair(dataset, num_examples, model, length=None):
     examples = []
@@ -746,3 +768,255 @@ def get_annotation(dataset, model, data):
         annotations[template_word] = span
     
     return annotations
+
+##########
+# Circuit Utils
+##########
+
+def get_hidden_states(
+    model,
+    submods,
+    dictionaries,
+    is_tuple,
+    input,
+):
+    hidden_states = {}
+    with model.trace(input, **tracer_kwargs), t.no_grad():
+        for submodule in submods:
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+            x_hat, upstream_act = dictionary(x, output_features=True)
+            hidden_states[submodule] = SparseAct(act=upstream_act.save(), res=(x - x_hat).save())
+    hidden_states = {k : v.value for k, v in hidden_states.items()}
+    return hidden_states
+
+def get_min_value(dtype):
+    if dtype.is_floating_point:
+        return t.finfo(dtype).min
+    elif dtype.is_signed:
+        return t.iinfo(dtype).min
+    else:
+        return 0
+
+def sparse_coo_max(x, dim):
+    """
+    x : a sparse COO tensor
+    dim : a dimension to reduce
+    return a sparse COO tensor with the maximum value along the specified dimension
+    """
+    # coalesce x
+    x = x.coalesce()
+    x_shape = x.shape
+    new_shape = list(x_shape)
+    del new_shape[dim]
+    new_shape = tuple(new_shape)
+
+    idxs = x.indices() # [len(x_shape), n]
+    new_idxs = t.cat([idxs[:dim], idxs[dim+1:]], dim=0) # [len(x_shape)-1, n]
+    new_idxs, inverse = new_idxs.unique(dim=-1, return_inverse=True)
+    new_values = t.full((new_idxs.shape[1],), get_min_value(x.dtype), dtype=x.dtype, device=x.device)
+
+    # for each new index, get the max value along original indexes that were merged to it. Use return_inverse
+    for i, j in enumerate(inverse):
+        new_values[j] = t.max(new_values[j], x.values()[i])
+
+    return t.sparse_coo_tensor(new_idxs, new_values, new_shape).coalesce()
+
+def sparse_coo_amax(x, dim):
+    """
+    x : a sparse COO tensor
+    dim : a dimension to reduce/a tuple of dimensions to reduce
+    return a sparse COO tensor with the maximum value along the specified dimension(s)
+    """
+    if isinstance(dim, int):
+        return sparse_coo_max(x, dim)
+    else:
+        dim = sorted(list(dim), reverse=True)
+        for d in dim:
+            x = sparse_coo_max(x, d)
+        return x
+
+def prod(l):
+    out = 1
+    for x in l: out *= x
+    return out
+
+def flatten_index(idxs, shape):
+    """
+    index : a tensor of shape [n, len(shape)]
+    shape : a shape
+    return a tensor of shape [n] where each element is the flattened index
+    """
+    idxs = idxs.t()
+    # get strides from shape
+    strides = [1]
+    for i in range(len(shape)-1, 0, -1):
+        strides.append(strides[-1]*shape[i])
+    strides = list(reversed(strides))
+    strides = t.tensor(strides).to(idxs.device)
+    # flatten index
+    return (idxs * strides).sum(dim=1).unsqueeze(0)
+
+def reshape_index(index, shape):
+    """
+    index : a tensor of shape [n]
+    shape : a shape
+    return a tensor of shape [n, len(shape)] where each element is the reshaped index
+    """
+    multi_index = []
+    for dim in reversed(shape):
+        multi_index.append(index % dim)
+        index //= dim
+    multi_index.reverse()
+    return t.stack(multi_index, dim=-1)
+
+def sparse_flatten(x):
+    x = x.coalesce()
+    return t.sparse_coo_tensor(
+        flatten_index(x.indices(), x.shape),
+        x.values(),
+        (prod(x.shape),)
+    )
+
+def sparse_reshape(x, shape):
+    """
+    x : a sparse COO tensor
+    shape : a shape
+    return x reshaped to shape
+    """
+    # first flatten x
+    x = sparse_flatten(x).coalesce()
+    new_indices = reshape_index(x.indices()[0], shape)
+    return t.sparse_coo_tensor(new_indices.t(), x.values(), shape)
+
+def rearrange_weights(nodes, edges):
+    # rearrange weight matrices
+    for child in edges:
+        # get shape for child
+        bc, sc, fc = nodes[child].act.shape
+        for parent in edges[child]:
+            weight_matrix = edges[child][parent]
+            if parent == 'y':
+                weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+            else:
+                bp, sp, fp = nodes[parent].act.shape
+                assert bp == bc
+                weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+            edges[child][parent] = weight_matrix
+
+def aggregate_weights(
+    nodes, edges, aggregation='max'
+):
+    if aggregation == 'sum':
+        # aggregate across sequence position
+        for child in edges:
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = weight_matrix.sum(dim=1)
+                else:
+                    weight_matrix = weight_matrix.sum(dim=(1, 4))
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].sum(dim=1)
+
+        # aggregate across batch dimension
+        for child in edges:
+            bc, fc = nodes[child].act.shape
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = weight_matrix.sum(dim=0) / bc
+                else:
+                    bp, fp = nodes[parent].act.shape
+                    assert bp == bc
+                    weight_matrix = weight_matrix.sum(dim=(0,2)) / bc
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].mean(dim=0)
+    
+    elif aggregation == 'max':
+        # aggregate across sequence position
+        for child in edges:
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = sparse_coo_amax(weight_matrix, dim=1)
+                else:
+                    weight_matrix = sparse_coo_amax(weight_matrix, dim=(1, 4))
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].amax(dim=1)
+
+        # aggregate across batch dimension
+        for child in edges:
+            bc, fc = nodes[child].act.shape
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = sparse_coo_amax(weight_matrix, dim=0)
+                else:
+                    bp, fp = nodes[parent].act.shape
+                    assert bp == bc
+                    weight_matrix = sparse_coo_amax(weight_matrix, dim=(0,2))
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = nodes[node].amax(dim=0)
+
+
+    elif aggregation == 'none':
+
+        # aggregate across batch dimensions
+        for child in edges:
+            # get shape for child
+            bc, sc, fc = nodes[child].act.shape
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+                    weight_matrix = weight_matrix.sum(dim=0) / bc
+                else:
+                    bp, sp, fp = nodes[parent].act.shape
+                    assert bp == bc
+                    weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+                    weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            nodes[node] = nodes[node].mean(dim=0)
+
+    else:
+        raise ValueError(f"Unknown aggregation: {aggregation}")
+
+##########
+# save and load circuit utils
+##########
+
+def save_circuit(save_dir, nodes, edges, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
+    save_dict = {
+        "nodes" : dict(nodes),
+        "edges" : dict(edges)
+    }
+    save_basename = f"{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}"
+
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    with open(f'{save_dir}{save_basename}.pt', 'wb') as outfile:
+        t.save(save_dict, outfile)
+
+def load_circuit(save_dir, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
+    path = f'{save_dir}{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}.pt'
+    return load_from(path)
+
+def load_from(circuit_path):
+    with open(circuit_path, 'rb') as infile:
+        save_dict = t.load(infile)
+    nodes = save_dict['nodes']
+    edges = save_dict['edges']
+    return nodes, edges

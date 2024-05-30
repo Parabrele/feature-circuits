@@ -37,24 +37,33 @@ import torch
 import networkx as nx
 import networkit as nk
 
-from utils import SparseAct
+from utils import SparseAct, get_hidden_states
 
 ##########
 # faithfulness & model evaluation
 ##########
 
+def get_layer_idx(submod_name):
+    module_split = submod_name.split('_')
+    if module_split[0] in ['resid', 'attn', 'mlp']:
+        return int(module_split[1])
+    elif module_split[0] == 'embed':
+        return 0
+    else:
+        raise ValueError(f"Unknown module : {submod_name}")
+
 @torch.no_grad()
 def get_mask(circuit, threshold):
     """
     circuit :
-    tuple (nodes, edges)
-        nodes : dict of SparseAct with keys layer names
-        edges : dict of dict of sparse_coo tensors, [name_upstream][name_downstream] -> edge weights
+    edges : dict of dict of sparse_coo tensors, [name_upstream][name_downstream] -> edge weights
 
     returns a dict similar to edges but binary sparse coo tensors : only weights above threshold are kept
     """
+    if isinstance(circuit, tuple):
+        circuit = circuit[1]
 
-    nodes, edges = circuit
+    edges = circuit
     mask = {}
 
     for upstream in edges:
@@ -65,16 +74,28 @@ def get_mask(circuit, threshold):
                 mask[upstream][downstream] = torch.sparse_coo_tensor([], [], weights.size())
             else:
                 value_mask = weights.values() > threshold
-                mask[upstream][downstream] = torch.sparse_coo_tensor(weights.indices()[value_mask], weights.values()[value_mask], weights.size())
-        
+                mask[upstream][downstream] = torch.sparse_coo_tensor(weights.indices()[:, value_mask], weights.values()[value_mask], weights.size())
     return mask
+
+def reorder_mask(edges):
+    """
+    mask : dict of dict of sparse_coo tensors
+    returns a dict of dict of sparse_coo tensors
+    """
+    new_mask = {}
+    for up in edges:
+        for down in edges[up]:
+            if down not in new_mask:
+                new_mask[down] = {}
+            new_mask[down][up] = edges[up][down]
+    return new_mask
 
 @torch.no_grad()
 def run_graph(
         model,
         submodules,
         sae_dict,
-        name_dict,
+        mod2name,
         clean,
         patch,
         circuit,
@@ -112,24 +133,30 @@ def run_graph(
     returns the metric on the model with the graph
     """
 
-    sub_dict = {v : k for k, v in name_dict.items()}
+    # various initializations
+    circuit = reorder_mask(circuit)
+
+    if complement:
+        raise NotImplementedError("Complement is not implemented yet")
+
+    name2mod = {v : k for k, v in mod2name.items()}
+    
+    is_tuple = {}
+    with model.trace("_"), torch.no_grad():
+        for submodule in submodules:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
 
     if patch is None:
         patch = clean
-    patch_states = {}
 
-    with model.trace(patch):
-        for submodule in submodules:
-            downstream_dict = sae_dict[submodule]
-            x = submodule.output
-            if type(x) == tuple:
-                x = x[0]
-            x_hat, f = downstream_dict(x, output_features=True)
-            patch_states[submodule] = SparseAct(act=f, res=x - x_hat).save()
-    
+    # get patch hidden states
+    patch_states = get_hidden_states(model, submodules, sae_dict, is_tuple, patch)
     patch_states = {k : ablation_fn(v.value) for k, v in patch_states.items()}
 
-    # For each downstream module, get it's potentially alive features by reachability from previously alive ones
+    # forward through the model by computing each node as described by the graph and not as the original model does
+
+    # For each downstream module, get it's potentially alive features (heuristic to not compute one forward pass per node
+    # as there are too many of them) by reachability from previously alive ones
     # Then, for each of these features, get it's masked input, and compute a forward pass to get this particular feature.
     # This gives the new state for this downstream output.
 
@@ -138,7 +165,7 @@ def run_graph(
         for downstream in submodules:
             # get downstream dict, output, ...
             downstream_dict = sae_dict[downstream]
-            down_name = name_dict[downstream]
+            down_name = mod2name[downstream]
 
             input_shape = downstream.input.size()
             x = downstream.output
@@ -164,27 +191,22 @@ def run_graph(
             #        or close enough on a few examples to validate this choice.
             # TODO : of course, mention it in the paper.
             # TODO?: for features whose masks are all zeros, skip and keep only the patch state
-            # TODO?: compress the model and its graph by deleting SAE features that are neither reachable nor co reachable
-            # TODO?: graph weights should be absolute values
             # TODO : mask[:-1] @ (cat(..., 1).aggregate(dim=(0, 1)))
             potentially_alive = torch.sparse_coo_tensor([], [], f.size())
-            for up_name in circuit:
-                if down_name in circuit[up_name]:
-                    upstream = sub_dict[up_name]
-                    mask = circuit[up_name][down_name] # shape (f_down + 1, f_up + 1)
-                    potentially_alive += (
-                        mask[:-1, :-1] @ hidden_states[upstream].act.to_sparse()
-                    ).to(potentially_alive.dtype)
+            for up_name in circuit[down_name]:
+                upstream = name2mod[up_name]
+                mask = circuit[down_name][up_name] # shape (f_down + 1, f_up + 1)
+                potentially_alive += (
+                    mask[:-1, :-1] @ hidden_states[upstream].act.to_sparse()
+                ).to(potentially_alive.dtype)
 
             for f_ in potentially_alive.indices()[0]:
                 edge_ablated_input = torch.zeros(input_shape)
-                for up_name in circuit:
-                    if down_name not in circuit[up_name]:
-                        continue
-                    upstream = sub_dict[up_name]
+                for up_name in circuit[down_name]:
+                    upstream = name2mod[up_name]
                     upstream_dict = sae_dict[upstream]
                     
-                    mask = circuit[up_name][down_name][f_] # shape (f_down + 1, f_up + 1)
+                    mask = circuit[down_name][up_name][f_] # shape (f_down + 1, f_up + 1)
 
                     edge_ablated_upstream = SparseAct(
                         act = hidden_states[upstream].act[:, :, mask[:-1]] + patch_states[upstream].act[:, :, ~mask[:-1]],
@@ -193,7 +215,13 @@ def run_graph(
 
                     edge_ablated_input += upstream_dict.decode(edge_ablated_upstream.act) + edge_ablated_upstream.res
 
-                edge_ablated_out = downstream.forward(edge_ablated_input)
+                module_type = down_name.split('_')[0]
+                if module_type == 'resid':
+                    # if resid only, do this, othewise, should be literally the identity as the sum gives resid_post already.
+                    edge_ablated_out = downstream.forward(edge_ablated_input)
+                else:
+                    # if attn or mlp, use corresponding LN
+                    raise NotImplementedError(f"Support for module type {module_type} is not implemented yet")
                 if f_ < f.size(-1):
                     # TODO : add option in sae forward to get only one feature to fasten this
                     #        only after testing that it works like this first and then checking that it
@@ -213,6 +241,7 @@ def run_graph(
 
     return metric.value
 
+# TODO : compute statistics on the graph (nb of edges, nb of nodes)
 @torch.no_grad()
 def faithfulness(
         model,
@@ -242,7 +271,7 @@ def faithfulness(
         the counterfactual input to the model to ablate edges.
         If None, ablation_fn is default to mean
         Else, ablation_fn is default to identity
-    circuit : tuple (nodes, edges)
+    circuit : edges
     thresholds : float or list of float
         the thresholds to discard edges based on their weights
     metric_fn : callable
@@ -304,6 +333,7 @@ def faithfulness(
     # get metric on thresholded graph
     for threshold in thresholds:
         mask = get_mask(circuit, threshold)
+        pruned = prune(mask)
 
         # TODO : get graph informations
         #results[threshold][TODO] = TODO
@@ -315,7 +345,7 @@ def faithfulness(
             name_dict,
             clean,
             patch,
-            mask,
+            pruned,
             metric_fn,
             metric_fn_kwargs,
             ablation_fn,
@@ -329,7 +359,7 @@ def faithfulness(
             name_dict,
             clean,
             patch,
-            mask,
+            pruned,
             metric_fn,
             metric_fn_kwargs,
             ablation_fn,
@@ -401,10 +431,117 @@ def to_tuple(G):
     """
     raise NotImplementedError
 
-@torch.no_grad()
 def prune(
-    G,
-    return_tuple=False,
+    circuit
+):
+    """
+    circuit : nx.DiGraph or dict of dict of sparse_coo tensors
+    returns a new nx.DiGraph or dict of dict of sparse_coo tensors
+    """
+    if isinstance(circuit, nx.DiGraph):
+        return prune_nx(circuit)
+    else:
+        return prune_sparse_coos(circuit)
+
+def reorder_upstream(edges):
+    """
+    edges : dict of dict of sparse_coo tensors
+    returns a dict of dict of sparse_coo tensors
+    """
+    new_edges = {}
+    for up in reversed(list(edges.keys())):
+        new_edges[up] = edges[up]
+    return new_edges
+
+def coalesce_edges(edges):
+    """
+    coalesce all edges sparse coo weights
+    """
+    for up in edges:
+        for down in edges[up]:
+            edges[up][down] = edges[up][down].coalesce()
+    return edges
+
+@torch.no_grad()
+def prune_sparse_coos(
+    circuit
+):
+    """
+    circuit : edges
+    returns a new edges
+
+    Assumes edges is a dict of bool sparse coo tensors. If not, it will just forget the values.
+    """
+    circuit = coalesce_edges(reorder_upstream(circuit))
+
+    # build a dict module_name -> sparse vector of bools, where True means that the feature is reachable from one embed node
+    size = {}
+    reachable = {}
+
+    for upstream in circuit:
+        for downstream in circuit[upstream]:
+            if downstream == 'y':
+                size[upstream] = circuit[upstream][downstream].size(0)
+                size[downstream] = 1
+            else:
+                size[upstream] = circuit[upstream][downstream].size(1)
+                size[downstream] = circuit[upstream][downstream].size(0)                    
+    
+    # build a sparse_coo_tensor of ones with size (size['embed']) :
+    reachable['embed'] = torch.sparse_coo_tensor(
+        torch.arange(size['embed']).unsqueeze(0),
+        torch.ones(size['embed']),
+        (size['embed'],),
+        device=circuit[upstream][downstream].device,
+    ).coalesce()
+
+    for upstream in circuit:
+        for downstream in circuit[upstream]:
+            if upstream not in reachable:
+                raise ValueError(f"Upstream {upstream} reachability not available. Check the order of the keys.")
+            if downstream not in reachable:
+                reachable[downstream] = torch.sparse_coo_tensor(
+                    [[]], [],
+                    (size[downstream],),
+                    device=circuit[upstream][downstream].device
+                )
+
+            idx1 = circuit[upstream][downstream].indices() # (2, n1)
+            idx2 = reachable[upstream].indices() # (1, n2)
+
+            # keep only rows of circuit[upstream][downstream] at idx in idx2
+            new_edges = torch.sparse_coo_tensor(
+                [[]] if downstream == 'y' else [[], []],
+                [],
+                circuit[upstream][downstream].size(),
+                device=circuit[upstream][downstream].device
+            ).coalesce()
+            for u in idx2[0]:
+                mask = (idx1[0] == u if downstream == 'y' else idx1[1] == u)
+                new_edges = torch.sparse_coo_tensor(
+                    torch.cat([new_edges.indices(), idx1[:, mask]], dim=1),
+                    torch.cat([new_edges.values(), circuit[upstream][downstream].values()[mask]]),
+                    new_edges.size(),
+                    device=circuit[upstream][downstream].device
+                ).coalesce()
+
+            circuit[upstream][downstream] = new_edges
+
+            # now look at what downstream features are reachable, as just the indices in the new_edges and add them to reachable[downstream]
+            idx = new_edges.indices()[0].unique()
+            reachable[downstream] += torch.sparse_coo_tensor(
+                idx.unsqueeze(0),
+                torch.ones(idx.size(0)),
+                (size[downstream],),
+                device=circuit[upstream][downstream].device
+            )
+            reachable[downstream] = reachable[downstream].coalesce()
+    
+    return circuit
+
+@torch.no_grad()
+def prune_nx(
+    G
 ):
     """
     circuit : nx.DiGraph
@@ -431,18 +568,15 @@ def prune(
 
     G.remove_nodes_from(complement)
 
-    # # do reachability from 'embed' -> v for all v, remove all nodes that are not reachable
-    # reachable = nx.descendants(G, 'embed')
-    # complement = set(G.nodes) - reachable
+    # do reachability from 'embed' -> v for all v, remove all nodes that are not reachable
+    reachable = nx.descendants(G, 'embed')
+    complement = set(G.nodes) - reachable
 
-    # G.remove_nodes_from(complement)
+    G.remove_nodes_from(complement)
 
     # untangle the 'embed' node into its original nodes and return the new graph
-    G.remove_node('embed')
     G.add_edges_from(save)
 
-    if return_tuple:
-        return to_tuple(G)
     return G
 
 def get_avg_degree(G):
@@ -454,6 +588,7 @@ def get_connected_components(G):
 
     G = G.copy()
     G.remove_node('y')
+
     return nx.number_connected_components(G)
 
 def get_density(G):
@@ -509,8 +644,6 @@ def sparsity(
         'avgdegree' : get_avg_degree(G),
         'connected_components' : get_connected_components(G),
         'density' : get_density(G),
-        # 'global_clustering_coefficient' : get_global_clustering_coefficient(G),
-        # 'transitivity' : get_transitivity(G),
         'degree_distribution' : get_degree_distribution(G),
     }
 
@@ -521,7 +654,7 @@ def sparsity(
 
     return results
 
-def single_community_modularity(G, C, weighted=False):
+def single_community_modularity(G, C, weighted=False, output_n_edges=False):
     """
     G : nk.Graph
     C : set of nodes
@@ -540,11 +673,17 @@ def single_community_modularity(G, C, weighted=False):
             sum2 += G.degree(node)
         sum2 -= sum1 # edges from C to C are counted twice, but not those from C to V \ C
 
+        if sum2 == 0:
+            if output_n_edges:
+                return sum1, 0
+            return 0
+        if output_n_edges:
+            return sum1, sum1 / sum2
         return sum1 / sum2
     else:
         raise NotImplementedError
 
-# TODO : plot leiden results wrt iterations
+# TODO : plot leiden results wrt iterations (or plot [quality o (communities o to_merged_graph)^n](communities))
 @torch.no_grad()
 def modularity(
     circuit,
@@ -566,15 +705,20 @@ def modularity(
         if True, the graph is weighted
     log_weighted : bool
         if True, the weights are log( _ / eps )
-    returns (dict : subset -> score), float)
+    returns (dict : subset -> score), float, float
     """
 
-
     if isinstance(circuit, tuple):
-        G = to_Digraph(circuit)
-        G = nk.nxadapter.nx2nk(G)
-    else:
-        G = nk.nxadapter.nx2nk(circuit)
+        circuit = to_Digraph(circuit)
+    
+    try :
+        circuit = circuit.copy()
+        circuit.remove_node('y')
+    except:
+        pass
+
+    G = nk.nxadapter.nx2nk(circuit)
+    G = nk.graphtools.toUndirected(G)
         
     if weighted:
         raise NotImplementedError
@@ -600,8 +744,23 @@ def modularity(
 
     subset_ids = communities.getSubsetIds()
     dict_communities = {
-        subset_id : single_community_modularity(G, communities.getMembers(subset_id), weighted=weighted)
+        subset_id : {
+            'n_nodes' : len(communities.getMembers(subset_id)),
+            'score' : single_community_modularity(G, communities.getMembers(subset_id), weighted=weighted, output_n_edges=True)
+        }
         for subset_id in subset_ids
     }
+
+    to_del = []
+    for subset_id in dict_communities:
+        if dict_communities[subset_id]['n_nodes'] == 1:
+            to_del.append(subset_id)
+            continue
+        dict_communities[subset_id]['n_edges'], dict_communities[subset_id]['score'] = dict_communities[subset_id]['score']
     
-    return dict_communities, quality
+    for subset_id in to_del:
+        del dict_communities[subset_id]
+
+    avg_single_community_modularity = sum([v['score'] * v['n_nodes'] for v in dict_communities.values()]) / sum([v['n_nodes'] for v in dict_communities.values()])
+
+    return dict_communities, avg_single_community_modularity, quality

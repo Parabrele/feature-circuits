@@ -14,6 +14,166 @@ else:
 
 EffectOut = namedtuple('EffectOut', ['effects', 'deltas', 'grads', 'total_effect'])
 
+def y_effect(
+    model,
+    clean,
+    hidden_states_clean,
+    hidden_states_patch,
+    last_layer,
+    dictionaries,
+    is_tuple,
+    steps,
+    metric_fn,
+    metric_kwargs=dict(),
+):
+    dictionary = dictionaries[last_layer]
+    clean_state = hidden_states_clean[last_layer]
+    patch_state = hidden_states_patch[last_layer]
+
+    with model.trace(**tracer_kwargs) as tracer:
+        metrics = []
+        fs = []
+        for step in range(steps):
+            alpha = step / steps
+            upstream_act = (1 - alpha) * clean_state + alpha * patch_state
+            upstream_act.act.retain_grad()
+            upstream_act.res.retain_grad()
+            fs.append(upstream_act)
+            with tracer.invoke(clean, scan=tracer_kwargs['scan']):
+                if is_tuple[last_layer]:
+                    last_layer.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
+                else:
+                    last_layer.output = dictionary.decode(upstream_act.act) + upstream_act.res
+                metrics.append(metric_fn(model, **metric_kwargs))
+        metric = sum([m for m in metrics])
+        metric.sum().backward(retain_graph=True)
+
+    mean_grad = sum([f.act.grad for f in fs]) / steps
+    mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+    grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+    delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+    effect = (grad @ delta).abs()
+
+    return effect
+
+def get_effect(
+    model,
+    clean,
+    hidden_states_clean,
+    hidden_states_patch,
+    dictionaries,
+    layer,
+    upstream_submod,
+    downstream_submod,
+    features_by_submod,
+    is_tuple,
+    steps,
+    normalise_edges,
+    edge_threshold,
+):
+    downstream_features = features_by_submod[downstream_submod]
+
+    print(f"Computing effects for layer {layer} with {len(downstream_features)} features")
+
+    if not features_by_submod[downstream_submod]: # handle empty list
+        raise ValueError(f"Module {downstream_submod} has no features to compute effects for")
+    
+    else:
+        downstream_dict = dictionaries[downstream_submod]
+        
+        effect_indices = {}
+        effect_values = {}
+        dictionary = dictionaries[upstream_submod]
+        clean_state = hidden_states_clean[upstream_submod]
+        patch_state = hidden_states_patch[upstream_submod]
+
+        fs_grads = [0 for _ in range(len(downstream_features))]
+        
+        for step in range(steps):
+            alpha = step / steps
+            upstream_act = (1 - alpha) * clean_state + alpha * patch_state
+            upstream_act.act.retain_grad()
+            upstream_act.res.retain_grad()
+            
+            with model.trace(clean, **tracer_kwargs):
+                if is_tuple[upstream_submod]:
+                    upstream_submod.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
+                else:
+                    upstream_submod.output = dictionary.decode(upstream_act.act) + upstream_act.res
+                
+                y = downstream_submod.output
+                if is_tuple[downstream_submod]:
+                    y = y[0]
+                y_hat, g = downstream_dict(y, output_features=True)
+                y_res = y - y_hat
+                # the left @ down in the original code was at least useful to populate .resc instead of .res. I should just du .resc = norm of .res :
+                # all values represent the norm of their respective feature, so if we consider .res as a feature, then we should indeed
+                # consider its norm as the node.
+                # /!\ do the .to_tensor().flatten() outside of the with in order for the proxies to be populated and .to_tensor() to not crash
+                downstream_act = SparseAct(
+                    act=g,
+                    resc=t.norm(y_res, dim=-1)
+                ).save()
+            
+            downstream_act = downstream_act.to_tensor().flatten()
+            
+            for i, downstream_feat in enumerate(downstream_features):
+                downstream_act[downstream_feat].backward(retain_graph=True)
+                fs_grads[i] += SparseAct(
+                    act=upstream_act.act.grad,
+                    res=upstream_act.res.grad
+                )
+                upstream_act.act.grad = t.zeros_like(upstream_act.act)
+                upstream_act.res.grad = t.zeros_like(upstream_act.res)
+
+        # get shapes
+        d_downstream_contracted = t.tensor(hidden_states_clean[downstream_submod].act.size())
+        d_downstream_contracted[-1] += 1
+        d_downstream_contracted = d_downstream_contracted.prod()
+        
+        d_upstream_contracted = t.tensor(upstream_act.act.size())
+        d_upstream_contracted[-1] += 1
+        d_upstream_contracted = d_upstream_contracted.prod()
+        
+        max_effect = None
+        for downstream_feat, fs_grad in zip(downstream_features, fs_grads):
+            grad = fs_grad / steps
+            delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+            effect = (grad @ delta).abs()
+            flat_effect = effect.to_tensor().flatten()
+
+            effect_indices[downstream_feat] = flat_effect.nonzero().squeeze(-1)
+            effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
+            
+            if normalise_edges:
+                tot_eff = effect_values[downstream_feat].sum()
+                effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
+                effect = effect / tot_eff
+
+            if max_effect is None:
+                max_effect = effect
+            else:
+                max_effect.act = t.where(effect.act.abs() > max_effect.act.abs(), effect.act, max_effect.act)
+                max_effect.resc = t.where(effect.resc.abs() > max_effect.resc.abs(), effect.resc, max_effect.resc)
+
+        features_by_submod[upstream_submod] = (max_effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
+
+        # converts the dictionary of indices to a tensor of indices
+        effect_indices = t.tensor(
+            [[downstream_feat for downstream_feat in downstream_features for _ in effect_indices[downstream_feat]],
+            t.cat([effect_indices[downstream_feat] for downstream_feat in downstream_features], dim=0)]
+        ).to(model.device)
+        effect_values = t.cat([effect_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
+
+        return t.sparse_coo_tensor(
+            effect_indices, effect_values,
+            (d_downstream_contracted, d_upstream_contracted)
+        ), max_effect
+
+##########
+# Marks functions
+##########
+
 def _pe_attrib(
         clean,
         patch,
@@ -175,7 +335,6 @@ def _pe_ig(
         grads[submodule] = grad
 
     return EffectOut(effects, deltas, grads, total_effect)
-
 
 def _pe_exact(
     clean,

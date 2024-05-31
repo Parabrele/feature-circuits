@@ -800,6 +800,11 @@ def get_min_value(dtype):
     else:
         return 0
 
+@t.jit.script
+def compile_for_loop(inverse, new_values, x_values):
+    for i, j in enumerate(inverse):
+        new_values[j] = t.max(new_values[j], x_values[i])
+        
 def sparse_coo_max(x, dim):
     """
     x : a sparse COO tensor
@@ -809,18 +814,15 @@ def sparse_coo_max(x, dim):
     # coalesce x
     x = x.coalesce()
     x_shape = x.shape
-    new_shape = list(x_shape)
-    del new_shape[dim]
-    new_shape = tuple(new_shape)
+    new_shape = x_shape[:dim] + x_shape[dim+1:]
 
     idxs = x.indices() # [len(x_shape), n]
-    new_idxs = t.cat([idxs[:dim], idxs[dim+1:]], dim=0) # [len(x_shape)-1, n]
+    new_idxs = t.cat((idxs[:dim], idxs[dim+1:]), dim=0) # [len(x_shape)-1, n]
     new_idxs, inverse = new_idxs.unique(dim=-1, return_inverse=True)
     new_values = t.full((new_idxs.shape[1],), get_min_value(x.dtype), dtype=x.dtype, device=x.device)
 
     # for each new index, get the max value along original indexes that were merged to it. Use return_inverse
-    for i, j in enumerate(inverse):
-        new_values[j] = t.max(new_values[j], x.values()[i])
+    compile_for_loop(inverse, new_values, x.values())
 
     return t.sparse_coo_tensor(new_idxs, new_values, new_shape).coalesce()
 

@@ -104,7 +104,7 @@ def get_circuit_resid_only(
         steps=10,
 ):
     all_submods = [embed] + [submod for submod in resids]
-    last_layer = all_submods[-1]
+    last_layer = resids[-1]
     n_layers = len(resids)
     
     # dummy forward pass to get shapes of outputs
@@ -125,31 +125,25 @@ def get_circuit_resid_only(
         }
     else:
         hidden_states_patch = get_hidden_states(model, submods=all_submods, dictionaries=dictionaries, is_tuple=is_tuple, input=patch)
+    
+    features_by_submod = {}
 
     # start by the effect of the last layer to the metric
-    effect = y_effect(
+    edge_effect, node_effect = y_effect(
         model,
         clean, hidden_states_clean, hidden_states_patch,
         last_layer, dictionaries, is_tuple,
         steps,
-        metric_fn, metric_kwargs
+        metric_fn, metric_kwargs,
+        normalise_edges, edge_threshold,
+        features_by_submod
     )
-    
-    if normalise_edges:
-        tot_eff = effect.to_tensor().sum()
-        effect = effect / tot_eff
 
-    nodes = {'y' : t.tensor([1.0]).to(effect.act.device)}
-    nodes[f'resid_{n_layers-1}'] = effect
+    nodes = {'y' : t.tensor([1.0]).to(node_effect.act.device)}
+    nodes[f'resid_{n_layers-1}'] = node_effect
 
     edges = defaultdict(lambda:{})
-    edges[f'resid_{len(resids)-1}'] = {
-        'y' : effect.to_tensor().flatten().to_sparse()
-    }
-
-    features_by_submod = {
-        last_layer : (effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
-    }
+    edges[f'resid_{len(resids)-1}'] = {'y' : edge_effect}
     
     # Now, backward through the model to get the effects of each layer on its successor.
     for layer in reversed(range(n_layers)):

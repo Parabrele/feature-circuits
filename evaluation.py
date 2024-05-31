@@ -393,9 +393,6 @@ def to_Digraph(circuit, discard_res=False, discard_y=False):
 
         for upstream in edges:
             for downstream in edges[upstream]:
-                print(upstream, downstream)
-                print(edges[upstream][downstream].coalesce().indices().shape)
-                print(edges[upstream][downstream].shape)
                 if downstream == 'y':
                     if discard_y:
                         continue

@@ -25,6 +25,9 @@ def y_effect(
     steps,
     metric_fn,
     metric_kwargs=dict(),
+    normalise_edges=False,
+    edge_threshold=0.01,
+    features_by_submod={},
 ):
     dictionary = dictionaries[last_layer]
     clean_state = hidden_states_clean[last_layer]
@@ -53,8 +56,40 @@ def y_effect(
     grad = SparseAct(act=mean_grad, res=mean_residual_grad)
     delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
     effect = (grad @ delta).abs()
+    max_effect = effect
 
-    return effect
+    if normalise_edges:
+        effect = effect.to_tensor().flatten()
+        
+        if clean_state.act.size(0) > 1:
+            raise NotImplementedError("Batch size > 1 not implemented yet.")
+        tot_eff = effect.sum()
+        effect = effect / tot_eff
+
+        perm = t.argsort(effect, descending=True)
+        perm_inv = t.argsort(perm)
+
+        cumsum = t.cumsum(effect[perm], dim=0)
+        mask = cumsum < edge_threshold
+        first_zero_idx = t.where(mask == 0)[0][0]
+        mask[first_zero_idx] = 1
+        mask = mask[perm_inv]
+
+        effect = t.where(
+            mask,
+            effect,
+            t.zeros_like(effect)
+        ).to_sparse()
+    else:
+        effect = t.where(
+                effect.to_tensor().flatten().abs() > edge_threshold,
+                effect,
+                t.zeros_like(effect)
+            ).to_sparse()
+
+    features_by_submod[last_layer] = effect.coalesce().indices()[0].unique().tolist()
+
+    return effect, max_effect
 
 def get_effect(
     model,
@@ -71,7 +106,15 @@ def get_effect(
     normalise_edges,
     edge_threshold,
 ):
-    downstream_features = features_by_submod[downstream_submod]
+    """
+    If normalise edges, divide them by their sum and take the smallest top k edges such that
+    their sum is above edge_threshold * total sum or the smallest is equal to edge_threshold
+    of the first one, to avoid cases where there is a shit ton of edges so the total is really big
+    """
+    try:
+        downstream_features = features_by_submod[downstream_submod]
+    except KeyError:
+        raise ValueError(f"Module {downstream_submod} has no features to compute effects for")
 
     print(f"Computing effects for layer {layer} with {len(downstream_features)} features")
 
@@ -136,19 +179,50 @@ def get_effect(
         d_upstream_contracted = d_upstream_contracted.prod()
         
         max_effect = None
+
+        # TODO : try to compile that loop
         for downstream_feat, fs_grad in zip(downstream_features, fs_grads):
             grad = fs_grad / steps
             delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
             effect = (grad @ delta).abs()
+            
+            # if normalise_edges:
+            #     tot_eff = effect_values[downstream_feat].sum()
+            #     effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
+            #     effect = effect / tot_eff
+            
             flat_effect = effect.to_tensor().flatten()
 
-            effect_indices[downstream_feat] = flat_effect.nonzero().squeeze(-1)
-            effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
-            
             if normalise_edges:
+                """
+                get non zero indices, get tot effect, divide by tot effect, get top edge_threshold * 100 % edges
+                TODO : second case (edge_threshold * max edge) if degree is too high
+                """
+                if clean_state.act.size(0) > 1:
+                    raise NotImplementedError("Batch size > 1 not implemented yet.")
+
+                effect_indices[downstream_feat] = flat_effect.nonzero().squeeze(-1)
+                effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
                 tot_eff = effect_values[downstream_feat].sum()
                 effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
-                effect = effect / tot_eff
+
+                perm = t.argsort(effect_values[downstream_feat], descending=True)
+                cumsum = t.cumsum(effect_values[downstream_feat][perm], dim=0) # start at 0, end at 1
+
+                mask = cumsum < edge_threshold # only ones then only zeros
+                first_zero_idx = t.where(mask == 0)[0][0]
+                mask[first_zero_idx] = 1
+                effect_indices[downstream_feat] = effect_indices[downstream_feat][perm][mask]
+                effect_values[downstream_feat] = effect_values[downstream_feat][perm][mask]
+
+            else :
+                effect_indices[downstream_feat] = t.where(
+                    flat_effect.abs() > edge_threshold,
+                    flat_effect,
+                    t.zeros_like(flat_effect)
+                ).nonzero().squeeze(-1)
+
+                effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
 
             if max_effect is None:
                 max_effect = effect
@@ -156,14 +230,15 @@ def get_effect(
                 max_effect.act = t.where(effect.act.abs() > max_effect.act.abs(), effect.act, max_effect.act)
                 max_effect.resc = t.where(effect.resc.abs() > max_effect.resc.abs(), effect.resc, max_effect.resc)
 
-        features_by_submod[upstream_submod] = (max_effect.to_tensor().flatten().abs() > edge_threshold).nonzero().flatten().tolist()
-
         # converts the dictionary of indices to a tensor of indices
         effect_indices = t.tensor(
             [[downstream_feat for downstream_feat in downstream_features for _ in effect_indices[downstream_feat]],
             t.cat([effect_indices[downstream_feat] for downstream_feat in downstream_features], dim=0)]
         ).to(model.device)
         effect_values = t.cat([effect_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
+
+        
+        features_by_submod[upstream_submod] = effect_indices[1].unique().tolist()
 
         return t.sparse_coo_tensor(
             effect_indices, effect_values,

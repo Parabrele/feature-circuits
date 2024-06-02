@@ -87,7 +87,6 @@ def get_circuit(
             steps=steps,
         )
 
-# TODO : separate batch agreg (default : max) and seq agreg (default : sum)
 def get_circuit_resid_only(
         clean,
         patch,
@@ -321,7 +320,7 @@ def get_circuit_stop_at_layer(
         steps=10,
 ):
     """
-    TODO :
+    TOD? :
     Integrate into get circuit.
     The loop with model.trace and then tracer.invoke will need reworking.
     """
@@ -383,7 +382,7 @@ def get_circuit_stop_at_layer(
     metrics = []
     fs = []
 
-    # TODO : tracer.invoke batches all the calls automatically. Using start_at_layer is not compatible using .invoke : batch the calls manually and do only one model.trace
+    # TOD? : tracer.invoke batches all the calls automatically. Using start_at_layer is not compatible using .invoke : batch the calls manually and do only one model.trace
     for step in range(steps):
         alpha = step / steps
 

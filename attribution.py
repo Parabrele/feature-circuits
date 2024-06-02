@@ -196,7 +196,7 @@ def get_effect(
             if normalise_edges:
                 """
                 get non zero indices, get tot effect, divide by tot effect, get top edge_threshold * 100 % edges
-                TODO : second case (edge_threshold * max edge) if degree is too high
+                TOD?: second case (edge_threshold * max edge) if degree is too high
                 """
                 if clean_state.act.size(0) > 1:
                     raise NotImplementedError("Batch size > 1 not implemented yet.")
@@ -239,6 +239,9 @@ def get_effect(
 
         
         features_by_submod[upstream_submod] = effect_indices[1].unique().tolist()
+
+        print(f"Done computing effects for layer {layer}, found {len(effect_values)} edges & {len(features_by_submod[upstream_submod])} features")
+        print(f"upstream features : {features_by_submod[upstream_submod]}")
 
         return t.sparse_coo_tensor(
             effect_indices, effect_values,
@@ -397,8 +400,8 @@ def _pe_ig(
                         submodule.output = dictionary.decode(f.act) + f.res
                     metrics.append(metric_fn(model, **metric_kwargs))
             metric = sum([m for m in metrics])
-            metric.sum().backward(retain_graph=True) # TODO : why is this necessary? Probably shouldn't be, contact jaden
-
+            metric.sum().backward(retain_graph=True)
+            
         mean_grad = sum([f.act.grad for f in fs]) / steps
         mean_residual_grad = sum([f.res.grad for f in fs]) / steps
         grad = SparseAct(act=mean_grad, res=mean_residual_grad)

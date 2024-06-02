@@ -314,7 +314,6 @@ def plot_circuit(nodes, edges, layers=6, node_threshold=0.1, edge_threshold=0.01
     """
     TODO :
     edges _ - n have weights w_i, color them by w_i / sum(w_i)
-
     """
     
     # get min and max node effects
@@ -772,6 +771,32 @@ def get_annotation(dataset, model, data):
 ##########
 # Circuit Utils
 ##########
+
+def sparse_coo_truncate(x, dim=None):
+    """
+    implement x[...:-1...] for sparse COO tensors
+    """
+    if dim is None:
+        dim=0
+    if isinstance(dim, int):
+        new_shape = x.shape[:dim] + (x.shape[dim]-1,) + x.shape[dim+1:]
+        new_indices = x.indices().clone()
+        new_values = x.values().clone()
+        mask = new_indices[dim] < new_shape[dim]
+        new_indices = new_indices[:, mask]
+        new_values = new_values[mask]
+        return t.sparse_coo_tensor(new_indices, new_values, new_shape)
+    else:
+        new_shape = x.shape
+        for d in dim:
+            new_shape = new_shape[:d] + (x.shape[d]-1,) + new_shape[d+1:]
+        new_indices = x.indices().clone()
+        new_values = x.values().clone()
+        for d in dim:
+            mask = new_indices[d] < new_shape[d]
+            new_indices = new_indices[:, mask]
+            new_values = new_values[mask]
+        return t.sparse_coo_tensor(new_indices, new_values, new_shape)
 
 def get_hidden_states(
     model,

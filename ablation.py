@@ -62,7 +62,7 @@ def run_with_ablations(
         metric = metric_fn(model, **metric_kwargs).save()
     return metric.value
 
-# TODO : use accuracy/rank instead ?
+# TODO : use accuracy/rank instead ? Explore several metric functions
 
 # get m(C) for the circuit obtained by thresholding nodes with the given threshold
 def get_fcs(

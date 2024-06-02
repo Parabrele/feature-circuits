@@ -37,7 +37,7 @@ import torch
 import networkx as nx
 import networkit as nk
 
-from utils import SparseAct, get_hidden_states
+from utils import SparseAct, get_hidden_states, sparse_coo_truncate
 
 ##########
 # faithfulness & model evaluation
@@ -71,10 +71,19 @@ def get_mask(circuit, threshold):
         for downstream in edges[upstream]:
             weights = edges[upstream][downstream].coalesce()
             if threshold == -1:
-                mask[upstream][downstream] = torch.sparse_coo_tensor([], [], weights.size())
+                mask[upstream][downstream] = torch.sparse_coo_tensor(
+                    [[]] if downstream == 'y' else [[], []],
+                    [],
+                    weights.size()
+                )
             else:
                 value_mask = weights.values() > threshold
-                mask[upstream][downstream] = torch.sparse_coo_tensor(weights.indices()[:, value_mask], weights.values()[value_mask], weights.size())
+                mask[upstream][downstream] = torch.sparse_coo_tensor(
+                    weights.indices()[:, value_mask],
+                    torch.ones(value_mask.sum(), device=weights.device, dtype=torch.bool),
+                    weights.size(),
+                    dtype=torch.bool
+                )
     return mask
 
 def reorder_mask(edges):
@@ -89,6 +98,13 @@ def reorder_mask(edges):
                 new_mask[down] = {}
             new_mask[down][up] = edges[up][down]
     return new_mask
+
+@torch.jit.script
+def compiled_loop_pot_ali(mask_idx, potentially_alive, up_nz):
+    # in the mask indices has shape (2, ...), potentially alive downstream features are indices in [0] st indices[1] is in up_nz
+    for i, idx in enumerate(mask_idx[1]):
+        if up_nz[idx]:
+            potentially_alive[mask_idx[0][i]] = True
 
 @torch.no_grad()
 def run_graph(
@@ -142,8 +158,10 @@ def run_graph(
     name2mod = {v : k for k, v in mod2name.items()}
     
     is_tuple = {}
+    input_is_tuple = {}
     with model.trace("_"), torch.no_grad():
         for submodule in submodules:
+            input_is_tuple[submodule] = type(submodule.input.shape) == tuple
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
     if patch is None:
@@ -151,7 +169,7 @@ def run_graph(
 
     # get patch hidden states
     patch_states = get_hidden_states(model, submodules, sae_dict, is_tuple, patch)
-    patch_states = {k : ablation_fn(v.value) for k, v in patch_states.items()}
+    patch_states = {k : ablation_fn(v) for k, v in patch_states.items()}
 
     # forward through the model by computing each node as described by the graph and not as the original model does
 
@@ -160,88 +178,122 @@ def run_graph(
     # Then, for each of these features, get it's masked input, and compute a forward pass to get this particular feature.
     # This gives the new state for this downstream output.
 
-    with model.trace(clean):
-        hidden_states = {}
-        for downstream in submodules:
-            # get downstream dict, output, ...
-            downstream_dict = sae_dict[downstream]
-            down_name = mod2name[downstream]
+    # with model.trace(clean):
+    hidden_states = {}
+    for downstream in submodules:
+        # get downstream dict, output, ...
+        downstream_dict = sae_dict[downstream]
+        down_name = mod2name[downstream]
 
-            input_shape = downstream.input.size()
+        # TOD? : this surely can be replaced by a single call to trace, or none at all
+        with model.trace(clean):
+            if input_is_tuple[downstream]:
+                input_shape = downstream.input[0].shape
+                input_dict = downstream.input[1:].save()
+            else:
+                input_shape = downstream.input.shape
+            
             x = downstream.output
-            is_tuple = type(x) == tuple
-            if is_tuple:
+            if is_tuple[downstream]:
                 x = x[0]
-            x_hat, f = downstream_dict(x, output_features=True)
-            res = x - x_hat
+            x = x.save()
+        
+        if isinstance(input_shape, tuple):
+            input_shape = input_shape[0]
+            
+        x_hat, f = downstream_dict(x, output_features=True)
+        res = x - x_hat
 
-            # if downstream is embed, there is no upstream and the result stays unchanged
-            if down_name == 'embed':
-                hidden_states[downstream] = SparseAct(act=f, res=res)
-                continue
+        # if downstream is embed, there is no upstream and the result stays unchanged
+        if down_name == 'embed':
+            hidden_states[downstream] = SparseAct(act=f, res=res)
+            continue
 
-            # otherwise, we have to do the computation as the graph describes it, and each downstream
-            # feature, including the res, is computed from a different set of upstream features
+        # otherwise, we have to do the computation as the graph describes it, and each downstream
+        # feature, including the res, is computed from a different set of upstream features
 
-            # TODO : this is wrong, I have to compute all features, even those who have no predecessors
-            # alive as it may be important that they are all asleep for this particular function
-            # However, it is computationally unreasonable to compute tens of thousands of forward passes,
-            # so until a better solution is found, I will do this.
-            # TODO : check that the result between this and all features being potentially alive are the same
-            #        or close enough on a few examples to validate this choice.
-            # TODO : of course, mention it in the paper.
-            # TODO?: for features whose masks are all zeros, skip and keep only the patch state
-            # TODO : mask[:-1] @ (cat(..., 1).aggregate(dim=(0, 1)))
-            potentially_alive = torch.sparse_coo_tensor([], [], f.size())
+        # TODO : this is wrong, I have to compute all features, even those who have no predecessors
+        # alive as it may be important that they are all asleep for this particular function
+        # However, it is computationally unreasonable to compute tens of thousands of forward passes,
+        # so until a better solution is found, I will do this.
+        # TODO : check that the result between this and all features being potentially alive are the same
+        #        or close enough on a few examples to validate this choice.
+        # TODO : of course, mention it in the paper.
+        # TOD? : for features whose masks are all zeros, skip and keep only the patch state
+        
+        potentially_alive = torch.zeros(f.shape[-1] + 1, device=f.device, dtype=torch.bool)
+        for up_name in circuit[down_name]:
+            upstream = name2mod[up_name]
+            mask = circuit[down_name][up_name] # shape (f_down + 1, f_up + 1)
+
+            upstream_hidden = hidden_states[upstream].act # shape (batch, seq_len, f_up)
+            # reduce to (f_up) by maxing over batch and seq_len (should only have positive entries, but a .abs() can't hurt)
+            upstream_hidden = upstream_hidden.abs().amax(dim=(0, 1)) # shape (f_up)
+            up_nz = torch.cat([upstream_hidden > 0, torch.tensor([True], device=f.device)]) # shape (f_up + 1). Always keep the res feature alive
+            
+            compiled_loop_pot_ali(mask.indices(), potentially_alive, up_nz)
+
+        potentially_alive = potentially_alive.nonzero().squeeze(1)
+
+        f[...] = patch_states[downstream].act # shape (batch, seq_len, f_down)
+        for f_ in potentially_alive:
+            edge_ablated_input = torch.zeros(tuple(input_shape)).to(f.device)
             for up_name in circuit[down_name]:
                 upstream = name2mod[up_name]
-                mask = circuit[down_name][up_name] # shape (f_down + 1, f_up + 1)
-                potentially_alive += (
-                    mask[:-1, :-1] @ hidden_states[upstream].act.to_sparse()
-                ).to(potentially_alive.dtype)
+                upstream_dict = sae_dict[upstream]
+                
+                mask = circuit[down_name][up_name][f_].to_dense() # shape (f_up + 1)
 
-            for f_ in potentially_alive.indices()[0]:
-                edge_ablated_input = torch.zeros(input_shape)
-                for up_name in circuit[down_name]:
-                    upstream = name2mod[up_name]
-                    upstream_dict = sae_dict[upstream]
-                    
-                    mask = circuit[down_name][up_name][f_] # shape (f_down + 1, f_up + 1)
+                edge_ablated_upstream = SparseAct(
+                    act = patch_states[upstream].act,
+                    res = hidden_states[upstream].res if mask[-1] else patch_states[upstream].res
+                )
+                edge_ablated_upstream.act[:, :, mask[:-1]] = hidden_states[upstream].act[:, :, mask[:-1]]
 
-                    edge_ablated_upstream = SparseAct(
-                        act = hidden_states[upstream].act[:, :, mask[:-1]] + patch_states[upstream].act[:, :, ~mask[:-1]],
-                        res = hidden_states[upstream].res if mask[-1] else patch_states[upstream].res
-                    )
+                edge_ablated_input += upstream_dict.decode(edge_ablated_upstream.act) + edge_ablated_upstream.res
 
-                    edge_ablated_input += upstream_dict.decode(edge_ablated_upstream.act) + edge_ablated_upstream.res
-
-                module_type = down_name.split('_')[0]
-                if module_type == 'resid':
-                    # if resid only, do this, othewise, should be literally the identity as the sum gives resid_post already.
+            module_type = down_name.split('_')[0]
+            # TODO : batch these forward passes to speed up the process
+            if module_type == 'resid':
+                # if resid only, do this, othewise, should be literally the identity as the sum gives resid_post already.
+                if input_is_tuple[downstream]:
+                    edge_ablated_out = downstream.forward(edge_ablated_input, **input_dict.value[0])
+                else:
                     edge_ablated_out = downstream.forward(edge_ablated_input)
-                else:
-                    # if attn or mlp, use corresponding LN
-                    raise NotImplementedError(f"Support for module type {module_type} is not implemented yet")
-                if f_ < f.size(-1):
-                    # TODO : add option in sae forward to get only one feature to fasten this
-                    #        only after testing that it works like this first and then checking that it
-                    #        is faster and doesn't break anything
-                    f[..., f_] = downstream_dict.encode(edge_ablated_out)[..., f_]
-                else:
-                    res = edge_ablated_out - downstream_dict(edge_ablated_out)
-
-            hidden_states[downstream] = SparseAct(act=f, res=res)
-
-            if is_tuple:
-                downstream.output[0][:] = downstream_dict.decode(f) + res
+                if is_tuple[downstream]:
+                    edge_ablated_out = edge_ablated_out[0]
             else:
-                downstream.output = downstream_dict.decode(f) + res
+                # if attn or mlp, use corresponding LN
+                raise NotImplementedError(f"Support for module type {module_type} is not implemented yet")
+            if f_ < f.shape[-1]:
+                # TODO : add option in sae forward to get only one feature to fasten this
+                #        only after testing that it works like this first and then checking that it
+                #        is faster and doesn't break anything
+                #        more generally, try to compress each node function as much as possible.
+                f[..., f_] = downstream_dict.encode(edge_ablated_out)[..., f_]
+            else:
+                res = edge_ablated_out - downstream_dict(edge_ablated_out)
 
+        hidden_states[downstream] = SparseAct(act=f, res=res)
+
+        # if is_tuple[downstream]:
+        #     downstream.output[0][:] = downstream_dict.decode(f) + res
+        # else:
+        #     downstream.output = downstream_dict.decode(f) + res
+
+    last_layer = submodules[-1]
+    with model.trace(clean):
+        if is_tuple[last_layer]:
+            last_layer.output[0][:] = sae_dict[last_layer].decode(hidden_states[last_layer].act) + hidden_states[last_layer].res
+        else:
+            last_layer.output = sae_dict[last_layer].decode(hidden_states[last_layer].act) + hidden_states[last_layer].res
         metric = metric_fn(model, **metric_fn_kwargs).save()
 
     return metric.value
 
 # TODO : compute statistics on the graph (nb of edges, nb of nodes)
+# TODO : use several metric fcts to evaluate the model (logit difference, CE, KL, accuracy, 1/rank, etc.)
+#        compute them all at once to save compute time
 @torch.no_grad()
 def faithfulness(
         model,
@@ -254,7 +306,6 @@ def faithfulness(
         metric_fn,
         metric_fn_kwargs={},
         patch=None,
-        complement=False,
         ablation_fn=None,
         default_ablation='mean',
     ):
@@ -279,8 +330,6 @@ def faithfulness(
         It can be CE, accuracy, logit for target token, etc.
     metric_fn_kwargs : dict
         the kwargs to pass to metric_fn. E.g. target token.
-    complement : bool
-        if True, the complement of the graph is used
     ablation_fn : callable
         the function used to get the patched states.
         E.g. : mean ablation means across batch and sequence length or only across one of them.
@@ -303,7 +352,7 @@ def faithfulness(
         if default_ablation == 'mean':
             ablation_fn = lambda x: x.mean(dim=(0, 1)).expand_as(x)
         elif default_ablation == 'zero':
-            ablation_fn = lambda x: torch.zeros_like(x)
+            ablation_fn = lambda x: SparseAct(torch.zeros_like(x.act), torch.zeros_like(x.res))
         else:
             raise ValueError(f"Unknown default ablation function : {default_ablation}")
         
@@ -321,6 +370,7 @@ def faithfulness(
         model,
         submodules,
         sae_dict,
+        name_dict,
         clean,
         patch,
         mask,
@@ -332,6 +382,8 @@ def faithfulness(
 
     # get metric on thresholded graph
     for threshold in thresholds:
+        results[threshold] = {}
+
         mask = get_mask(circuit, threshold)
         pruned = prune(mask)
 
@@ -352,23 +404,23 @@ def faithfulness(
         ).mean().item()
         results[threshold]['metric'] = threshold_result
 
-        complement_result = run_graph(
-            model,
-            submodules,
-            sae_dict,
-            name_dict,
-            clean,
-            patch,
-            pruned,
-            metric_fn,
-            metric_fn_kwargs,
-            ablation_fn,
-            complement=True,
-        ).mean().item()
-        results[threshold]['metric_comp'] = complement_result
+        # complement_result = run_graph(
+        #     model,
+        #     submodules,
+        #     sae_dict,
+        #     name_dict,
+        #     clean,
+        #     patch,
+        #     pruned,
+        #     metric_fn,
+        #     metric_fn_kwargs,
+        #     ablation_fn,
+        #     complement=True,
+        # ).mean().item()
+        # results[threshold]['metric_comp'] = complement_result
 
         results[threshold]['faithfulness'] = (threshold_result - empty) / (metric - empty)
-        results[threshold]['completeness'] = (complement_result - empty) / (metric - empty)
+        # results[threshold]['completeness'] = (complement_result - empty) / (metric - empty)
     
     return results
 
@@ -487,9 +539,10 @@ def prune_sparse_coos(
     # build a sparse_coo_tensor of ones with size (size['embed']) :
     reachable['embed'] = torch.sparse_coo_tensor(
         torch.arange(size['embed']).unsqueeze(0),
-        torch.ones(size['embed']),
+        torch.ones(size['embed'], device=circuit[upstream][downstream].device, dtype=torch.bool),
         (size['embed'],),
         device=circuit[upstream][downstream].device,
+        dtype=torch.bool
     ).coalesce()
 
     for upstream in circuit:
@@ -511,7 +564,8 @@ def prune_sparse_coos(
                 [[]] if downstream == 'y' else [[], []],
                 [],
                 circuit[upstream][downstream].size(),
-                device=circuit[upstream][downstream].device
+                device=circuit[upstream][downstream].device,
+                dtype=torch.bool
             ).coalesce()
             for u in idx2[0]:
                 mask = (idx1[0] == u if downstream == 'y' else idx1[1] == u)
@@ -519,7 +573,8 @@ def prune_sparse_coos(
                     torch.cat([new_edges.indices(), idx1[:, mask]], dim=1),
                     torch.cat([new_edges.values(), circuit[upstream][downstream].values()[mask]]),
                     new_edges.size(),
-                    device=circuit[upstream][downstream].device
+                    device=circuit[upstream][downstream].device,
+                    dtype=torch.bool
                 ).coalesce()
 
             circuit[upstream][downstream] = new_edges
@@ -588,6 +643,8 @@ def get_connected_components(G):
 
     return nx.number_connected_components(G)
 
+# TODO : define different density for different graphs, as depending on their architecture, most edges are not possible.
+#        should be #edges / #possible_edges
 def get_density(G):
     return nx.density(G)
 
@@ -651,6 +708,36 @@ def sparsity(
 
     return results
 
+# TODO : look into normalised cut paper to define a global metric similar to that.
+# TODO : do that from clusterability in NN :
+"""
+To measure the relative clusterability of an MLP, we sample 50 random networks by randomly shuffling the weight
+matrix of each layer of the trained network. We convert these
+networks to graphs, cluster them, and find their n-cuts. For
+CNNs, we shuffle the edge weights between channels once
+the network has been turned into a graph, which is equivalent to shuffling which two channels are connected by each
+spatial kernel slice. We then compare the n-cut of the trained
+network to the sampled n-cuts, estimating the left one-sided
+p-value (North, Curtis, and Sham 2002) and the Z-score: the
+number of standard deviations the network’s n-cut lies below or above the mean of the shuffle distribution. This determines whether the trained network is more clusterable than
+one would p
+"""
+# TODO : he does it with raw weights : try to rethink a way to do raw weight graph in transformers.
+# TODO : https://openreview.net/pdf?id=HJghQ7YU8H already showed success in identifying functional modules in NNs
+# TODO : do the same as they did, instead of having a graph, have a matrix of (nfeatures * nsamples) and bicluster this.
+# TODO : they did not try to kill all neurons except for those in a module to see if the model is still working.
+#        they only found neurons that fire in the same patterns. Link to neuro science ?
+# TODO : Maybe this can help reduce the cost of finding the graph : fisrt look at what nodes are likely to be in the same module
+#        then define nodes inside this module and voilà, here is the circuit for this unsupervisedly found behavior.
+# TODO : in fact they do it for a single layer, they basically look at the correlation between neurons.
+#        this is more or less what I dit with SAE dict correlation
+#        maybe this could lead to another measure of the quality of the graph : nodes with high correlation should belong to the same module
+#        and maybe modules as defined in this article should be the communities given by leiden, or be close, or at least should be good communities.
+#        even if not really related to the one found by leiden. Compare the functional interpretablitity of the two methods.
+#
+#       Technical detail : to get the big vector of active features, don't just concatenate feature vectors of one token, aggregate over sequence
+#       to get all features involved.
+# TODO : speak to martin ester.
 def single_community_modularity(G, C, weighted=False, output_n_edges=False):
     """
     G : nk.Graph
@@ -680,7 +767,7 @@ def single_community_modularity(G, C, weighted=False, output_n_edges=False):
     else:
         raise NotImplementedError
 
-# TODO : plot leiden results wrt iterations (or plot [quality o (communities o to_merged_graph)^n](communities))
+# TODO : plot leiden results wrt iterations (or plot [quality o (communities o to_merged_graph)^n](communities)) : do communities of communities
 @torch.no_grad()
 def modularity(
     circuit,

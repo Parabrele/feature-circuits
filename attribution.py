@@ -58,9 +58,8 @@ def y_effect(
     effect = (grad @ delta).abs()
     max_effect = effect
 
+    effect = effect.to_tensor().flatten()
     if normalise_edges:
-        effect = effect.to_tensor().flatten()
-        
         if clean_state.act.size(0) > 1:
             raise NotImplementedError("Batch size > 1 not implemented yet.")
         tot_eff = effect.sum()
@@ -82,7 +81,7 @@ def y_effect(
         ).to_sparse()
     else:
         effect = t.where(
-                effect.to_tensor().flatten().abs() > edge_threshold,
+                effect.abs() > edge_threshold,
                 effect,
                 t.zeros_like(effect)
             ).to_sparse()
@@ -241,8 +240,7 @@ def get_effect(
         features_by_submod[upstream_submod] = effect_indices[1].unique().tolist()
 
         print(f"Done computing effects for layer {layer}, found {len(effect_values)} edges & {len(features_by_submod[upstream_submod])} features")
-        print(f"upstream features : {features_by_submod[upstream_submod]}")
-
+        
         return t.sparse_coo_tensor(
             effect_indices, effect_values,
             (d_downstream_contracted, d_upstream_contracted)

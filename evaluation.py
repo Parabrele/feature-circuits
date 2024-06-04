@@ -270,7 +270,7 @@ def run_graph(
                 #        only after testing that it works like this first and then checking that it
                 #        is faster and doesn't break anything
                 #        more generally, try to compress each node function as much as possible.
-                f[..., f_] = downstream_dict.encode(edge_ablated_out)[..., f_]
+                f[..., f_] = downstream_dict.encode(edge_ablated_out)[..., f_] # replace by ", f_)"
             else:
                 res = edge_ablated_out - downstream_dict(edge_ablated_out)
 
@@ -387,8 +387,12 @@ def faithfulness(
         mask = get_mask(circuit, threshold)
         pruned = prune(mask)
 
-        # TODO : get graph informations
-        #results[threshold][TODO] = TODO
+        results[threshold]['n_nodes'] = get_n_nodes(pruned)
+        results[threshold]['n_edges'] = get_n_edges(pruned)
+        results[threshold]['avg_degree'] = results[threshold]['n_edges'] / results[threshold]['n_nodes']
+        results[threshold]['density'] = get_density(pruned)
+        # TODO : results[threshold]['modularity'] = modularity, as in kaarel, as in modularity in NN paper, as in me
+        #        results[threshold]['z_score'] = Z_score(pruned)
             
         threshold_result = run_graph(
             model,
@@ -431,17 +435,20 @@ def faithfulness(
 @torch.no_grad()
 def to_Digraph(circuit, discard_res=False, discard_y=False):
     """
-    circuit : tuple (nodes, edges) or nk.Graph
+    circuit : tuple (nodes, edges), dict or nk.Graph
     returns a networkx DiGraph
     """
     if isinstance(circuit, nx.DiGraph):
         return circuit
     elif isinstance(circuit, nk.Graph):
         return nk.nxadapter.nk2nx(circuit)
-    elif isinstance(circuit, tuple):
+    elif isinstance(circuit, tuple) or isinstance(circuit, dict):
         G = nx.DiGraph()
 
-        nodes, edges = circuit
+        if isinstance(circuit, tuple):
+            nodes, edges = circuit
+        else:
+            edges = circuit
 
         for upstream in edges:
             for downstream in edges[upstream]:
@@ -631,6 +638,33 @@ def prune_nx(
 
     return G
 
+def get_n_nodes(G):
+    if isinstance(G, nx.DiGraph):
+        return G.number_of_nodes()
+    elif isinstance(G, dict):
+        n_nodes = 0
+        for up in G:
+            up_nodes = torch.empty(0, dtype=torch.long)
+            for down in G[up]:
+                nodes = G[up][down].indices()[1].unique()
+                up_nodes = torch.cat([up_nodes, nodes])
+            n_nodes += up_nodes.unique().size(0)
+        return n_nodes
+    else :
+        raise ValueError("Unknown graph type")
+
+def get_n_edges(G):
+    if isinstance(G, nx.DiGraph):
+        return G.number_of_edges()
+    elif isinstance(G, dict):
+        n_edges = 0
+        for up in G:
+            for down in G[up]:
+                n_edges += G[up][down].values().size(0)
+        return n_edges
+    else :
+        raise ValueError("Unknown graph type")
+
 def get_avg_degree(G):
     return 2 * G.number_of_edges() / G.number_of_nodes()
 
@@ -643,10 +677,17 @@ def get_connected_components(G):
 
     return nx.number_connected_components(G)
 
-# TODO : define different density for different graphs, as depending on their architecture, most edges are not possible.
-#        should be #edges / #possible_edges
-def get_density(G):
-    return nx.density(G)
+def get_density(edges):
+    # edges is a dict of dict of sparse_coo tensors
+    if isinstance(edges, nx.DiGraph):
+        return nx.density(edges)
+    n_edges = 0
+    max_edges = 0
+    for up in edges:
+        for down in edges[up]:
+            n_edges += edges[up][down].values().size(0)
+            max_edges += edges[up][down].size(0) * edges[up][down].size(1)
+    return n_edges / max_edges
 
 def get_global_clustering_coefficient(G):
     return nx.average_clustering(G)
@@ -666,7 +707,7 @@ def sparsity(
     prune=False,
 ):
     """
-    circuit : tuple (nodes, edges) or nx.DiGraph or nk.Graph
+    circuit : tuple (nodes, edges), dict or nx.DiGraph or nk.Graph
     returns a dict
         'nedges' -> int
         'nnodes' -> int
@@ -687,7 +728,7 @@ def sparsity(
         - s metric
     """
 
-    if isinstance(circuit, tuple) or isinstance(circuit, nk.Graph):
+    if isinstance(circuit, tuple) or isinstance(circuit, dict) or isinstance(circuit, nk.Graph):
         G = to_Digraph(circuit)
     else:
         G = circuit
@@ -697,7 +738,7 @@ def sparsity(
         'nnodes' : G.number_of_nodes(),
         'avgdegree' : get_avg_degree(G),
         'connected_components' : get_connected_components(G),
-        'density' : get_density(G),
+        'density' : get_density(circuit),
         'degree_distribution' : get_degree_distribution(G),
     }
 
@@ -707,6 +748,54 @@ def sparsity(
         results['pruned'] = pruned
 
     return results
+
+def shuffle_edges(edges):
+    """
+    edges : dict of dict of sparse_coo tensors
+    returns a dict of dict of sparse_coo tensors, with edges uniformly randomly assigned to the active nodes
+    """
+    new_edges = {}
+    for up in edges:
+        new_edges[up] = {}
+        for down in edges[up]:
+            up_alive = edges[up][down].indices()[1].unique()
+            down_alive = edges[up][down].indices()[0].unique()
+            n_edges = edges[up][down].values().size(0)
+            new_edges[up][down] = torch.sparse_coo_tensor(
+                torch.stack([
+                    down_alive[torch.randint(down_alive.size(0), (n_edges,))],
+                    up_alive[torch.randint(up_alive.size(0), (n_edges,))]
+                ]),
+                torch.ones(n_edges, device=edges[up][down].device, dtype=torch.bool),
+                edges[up][down].size(),
+                device=edges[up][down].device,
+                dtype=torch.bool
+            ).coalesce()
+    return new_edges
+
+# TODO : to compare to kaarel's work, use [2] (quality, as defined by nx, optimized by leiden). Not good results on LIB even on toy models,
+#        no modularity in language models graphs. Ask them quantitative results to be able to compare.
+#        to compare to clusterability in NN paper, use their metric. They use spectral clustering, but I
+#        have really huge but sparse matrices, so I don't know if it is possible. This includes weights so it's nice.
+#        use my metric just to see if it is nice.
+def mean_std_clusterability(edges, n_samples=50):
+    """
+    edges : dict of dict of sparse_coo tensors
+    returns a tuple (mean, std) of the clusterability of the graph
+    """
+    clusterabilities = []
+    for _ in range(n_samples):
+        shuffled_edges = shuffle_edges(edges)
+        clusterabilities.append(modularity(shuffled_edges)[1])
+    return torch.tensor(clusterabilities).mean().item(), torch.tensor(clusterabilities).std().item()
+
+def Z_score(edges, n_samples=50):
+    """
+    edges : dict of dict of sparse_coo tensors
+    returns a tuple (mean, std) of the clusterability of the graph
+    """
+    mean, std = mean_std_clusterability(edges, n_samples)
+    return (modularity(edges)[1] - mean) / std
 
 # TODO : look into normalised cut paper to define a global metric similar to that.
 # TODO : do that from clusterability in NN :
@@ -767,7 +856,7 @@ def single_community_modularity(G, C, weighted=False, output_n_edges=False):
     else:
         raise NotImplementedError
 
-# TODO : plot leiden results wrt iterations (or plot [quality o (communities o to_merged_graph)^n](communities)) : do communities of communities
+# TOD? : plot leiden results wrt iterations (or plot [quality o (communities o to_merged_graph)^n](communities)) : do communities of communities
 @torch.no_grad()
 def modularity(
     circuit,
@@ -778,7 +867,7 @@ def modularity(
     log_weighted=False,
 ):
     """
-    circuit : tuple (nodes, edges) or nx.DiGraph
+    circuit : tuple (nodes, edges), dict or nx.DiGraph
     method : str
         only 'Leiden' is available for now
     iterations : int
@@ -792,7 +881,7 @@ def modularity(
     returns (dict : subset -> score), float, float
     """
 
-    if isinstance(circuit, tuple):
+    if isinstance(circuit, tuple) or isinstance(circuit, dict):
         circuit = to_Digraph(circuit)
     
     try :
@@ -845,6 +934,7 @@ def modularity(
     for subset_id in to_del:
         del dict_communities[subset_id]
 
+    # normalize by number of nodes ? larger communities are more likely to have better scores... choose whether to do it or not based on dict_communities
     avg_single_community_modularity = sum([v['score'] * v['n_nodes'] for v in dict_communities.values()]) / sum([v['n_nodes'] for v in dict_communities.values()])
 
     return dict_communities, avg_single_community_modularity, quality

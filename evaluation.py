@@ -119,6 +119,7 @@ def run_graph(
         metric_fn_kwargs,
         ablation_fn,
         complement=False,
+        clean_logits=None,
     ):
     """
     model : nnsight model
@@ -205,7 +206,7 @@ def run_graph(
         res = x - x_hat
 
         # if downstream is embed, there is no upstream and the result stays unchanged
-        if down_name == 'embed':
+        if down_name == 'embed' or downstream == submodules[0]:
             hidden_states[downstream] = SparseAct(act=f, res=res)
             continue
 
@@ -287,9 +288,20 @@ def run_graph(
             last_layer.output[0][:] = sae_dict[last_layer].decode(hidden_states[last_layer].act) + hidden_states[last_layer].res
         else:
             last_layer.output = sae_dict[last_layer].decode(hidden_states[last_layer].act) + hidden_states[last_layer].res
-        metric = metric_fn(model, **metric_fn_kwargs).save()
+        
+        if isinstance(metric_fn, dict):
+            metric = {}
+            for name, fn in metric_fn.items():
+                if name == "KL":
+                    metric[name] = fn(model, clean_logits=clean_logits, **metric_fn_kwargs).save()
+                else:
+                    metric[name] = fn(model, **metric_fn_kwargs).save()
+        else:
+            metric = metric_fn(model, **metric_fn_kwargs).save()
 
-    return metric.value
+    if isinstance(metric, dict):
+        return {name : value.value.mean().item() for name, value in metric.items()}
+    return metric.value.mean().item()
 
 # TODO : compute statistics on the graph (nb of edges, nb of nodes)
 # TODO : use several metric fcts to evaluate the model (logit difference, CE, KL, accuracy, 1/rank, etc.)
@@ -325,8 +337,8 @@ def faithfulness(
     circuit : edges
     thresholds : float or list of float
         the thresholds to discard edges based on their weights
-    metric_fn : callable
-        the function to evaluate the model.
+    metric_fn : callable or dict name -> callable
+        the function(s) to evaluate the model.
         It can be CE, accuracy, logit for target token, etc.
     metric_fn_kwargs : dict
         the kwargs to pass to metric_fn. E.g. target token.
@@ -360,9 +372,22 @@ def faithfulness(
 
     # get metric on original model
     with model.trace(clean):
-        metric = metric_fn(model, **metric_fn_kwargs).save()
-    metric = metric.value.mean().item()
-    results['complete'] = metric
+        clean_logits = model.output[0][:,-1,:].save()
+        if isinstance(metric_fn, dict):
+            metric = {}
+            for name, fn in metric_fn.items():
+                if name == "KL":
+                    metric[name] = fn(model, clean_logits=clean_logits, **metric_fn_kwargs).save()
+                else:
+                    metric[name] = fn(model, **metric_fn_kwargs).save()
+        else:
+            metric = metric_fn(model, **metric_fn_kwargs).save()
+    if isinstance(metric, dict):
+        results['complete'] = {}
+        for name, value in metric.items():
+            results['complete'][name] = value.value.mean().item()
+    else:
+        results['complete'] = metric.value.mean().item()
 
     # get metric on empty graph
     mask = get_mask(circuit, -1)
@@ -377,7 +402,8 @@ def faithfulness(
         metric_fn,
         metric_fn_kwargs,
         ablation_fn,
-    ).mean().item()
+        clean_logits=clean_logits
+    )
     results['empty'] = empty
 
     # get metric on thresholded graph
@@ -405,7 +431,8 @@ def faithfulness(
             metric_fn,
             metric_fn_kwargs,
             ablation_fn,
-        ).mean().item()
+            clean_logits=clean_logits
+        )
         results[threshold]['metric'] = threshold_result
 
         # complement_result = run_graph(
@@ -423,8 +450,17 @@ def faithfulness(
         # ).mean().item()
         # results[threshold]['metric_comp'] = complement_result
 
-        results[threshold]['faithfulness'] = (threshold_result - empty) / (metric - empty)
-        # results[threshold]['completeness'] = (complement_result - empty) / (metric - empty)
+        if isinstance(metric, dict):
+            results[threshold]['faithfulness'] = {}
+            for name, value in metric.items():
+                if "rank" in name or "acc" in name:
+                    results[threshold]['faithfulness'][name] = threshold_result[name] / results['complete'][name]
+                elif name == "KL":
+                    results[threshold]['faithfulness'][name] = threshold_result[name]
+                else:
+                    results[threshold]['faithfulness'][name] = (threshold_result[name] - empty[name]) / (metric[name] - empty[name])
+        else:
+            results[threshold]['faithfulness'] = (threshold_result - empty) / (metric - empty)
     
     return results
 

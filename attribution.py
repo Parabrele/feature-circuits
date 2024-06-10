@@ -115,7 +115,7 @@ def get_effect(
     except KeyError:
         raise ValueError(f"Module {downstream_submod} has no features to compute effects for")
 
-    print(f"Computing effects for layer {layer} with {len(downstream_features)} features")
+    #print(f"Computing effects for layer {layer} with {len(downstream_features)} features")
 
     if not features_by_submod[downstream_submod]: # handle empty list
         raise ValueError(f"Module {downstream_submod} has no features to compute effects for")
@@ -239,7 +239,7 @@ def get_effect(
         
         features_by_submod[upstream_submod] = effect_indices[1].unique().tolist()
 
-        print(f"Done computing effects for layer {layer}, found {len(effect_values)} edges & {len(features_by_submod[upstream_submod])} features")
+        #print(f"Done computing effects for layer {layer}, found {len(effect_values)} edges & {len(features_by_submod[upstream_submod])} features")
         
         return t.sparse_coo_tensor(
             effect_indices, effect_values,

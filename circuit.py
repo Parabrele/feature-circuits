@@ -30,6 +30,8 @@ def marche_pas():
         return wrapper
     return decorator
 
+available_methods = ['resid', 'marks', 'resid_topk']
+
 def get_circuit(
     clean,
     patch,
@@ -41,16 +43,16 @@ def get_circuit(
     attns=None,
     mlps=None,
     metric_kwargs=dict(),
-    original_marks=True, # whether to compute the circuit using the original marks method
-    normalise_edges=False, # whether to divide the edges entering a node by their sum
-    use_start_at_layer=False, # Whether to compute the layer-wise effects with the start at layer argument to save computation
+    method='resid',
     aggregation='max', # or 'none' for not aggregating across sequence position
     node_threshold=0.1,
     edge_threshold=0.01,
     steps=10,
     nodes_only=False,
 ):
-    if original_marks :
+    if method not in available_methods:
+        raise ValueError(f"Unknown circuit discovery method: {method}")
+    if method == 'marks':
         if (attns is None or mlps is None):
             raise ValueError("Original marks method requires attns and mlps to be provided")
         else:
@@ -80,8 +82,8 @@ def get_circuit(
             dictionaries,
             metric_fn,
             metric_kwargs=metric_kwargs,
-            normalise_edges=normalise_edges,
-            use_start_at_layer=use_start_at_layer,
+            normalise_edges=(method == 'resid_topk'),
+            use_start_at_layer=False,
             aggregation=aggregation,
             edge_threshold=edge_threshold,
             steps=steps,
@@ -167,6 +169,9 @@ def get_circuit_resid_only(
         else:
             nodes['embed'] = max_effect
             edges['embed'][f'resid_0'] = RR_effect
+        
+        gc.collect()
+        t.cuda.empty_cache()
 
     rearrange_weights(nodes, edges)
     aggregate_weights(nodes, edges, aggregation)

@@ -171,6 +171,14 @@ class SparseAct():
         else:
             raise ValueError("SparseAct has both residual and contracted residual. This is an unsupported state.")
     
+    @staticmethod
+    def maximum(a, b):
+        kwargs = {}
+        for attr in ['act', 'res', 'resc']:
+            if getattr(a, attr) is not None:
+                kwargs[attr] = t.maximum(getattr(a, attr), getattr(b, attr))
+        return SparseAct(**kwargs)
+
     def amax(self, dim=None):
         kwargs = {}
         for attr in ['act', 'res', 'resc']:
@@ -826,7 +834,7 @@ def get_min_value(dtype):
         return 0
 
 @t.jit.script
-def compile_for_loop(inverse, new_values, x_values):
+def compile_for_loop_sparse_coo_max(inverse, new_values, x_values):
     for i, j in enumerate(inverse):
         new_values[j] = t.max(new_values[j], x_values[i])
         
@@ -847,7 +855,7 @@ def sparse_coo_max(x, dim):
     new_values = t.full((new_idxs.shape[1],), get_min_value(x.dtype), dtype=x.dtype, device=x.device)
 
     # for each new index, get the max value along original indexes that were merged to it. Use return_inverse
-    compile_for_loop(inverse, new_values, x.values())
+    compile_for_loop_sparse_coo_max(inverse, new_values, x.values())
 
     return t.sparse_coo_tensor(new_idxs, new_values, new_shape).coalesce()
 
@@ -864,6 +872,33 @@ def sparse_coo_amax(x, dim):
         for d in dim:
             x = sparse_coo_max(x, d)
         return x
+
+@t.jit.script
+def compile_for_loop_sparse_coo_maximum(new_indices, new_values, indices, values):
+    for i, idx in enumerate(indices.t()):
+        mask = (new_indices == idx).all(dim=1)
+        new_values[mask] = t.max(new_values[mask], values[i])
+
+def sparse_coo_maximum(x, y):
+    """
+    x, y : sparse COO tensors with positive values !
+    return a sparse COO tensor with the maximum value elementwise between x and y
+    """
+    x = x.coalesce()
+    y = y.coalesce()
+    assert x.shape == y.shape
+    assert x.device == y.device
+    assert x.dtype == y.dtype
+
+    new_indices = t.cat((x.indices(), y.indices()), dim=1)
+    new_indices = new_indices.unique(dim=-1)
+
+    new_values = t.full((new_indices.shape[1],), 0, dtype=x.dtype, device=x.device)
+
+    compile_for_loop_sparse_coo_maximum(new_indices, new_values, x.indices(), x.values())
+    compile_for_loop_sparse_coo_maximum(new_indices, new_values, y.indices(), y.values())
+
+    return t.sparse_coo_tensor(new_indices, new_values, x.shape).coalesce()
 
 def prod(l):
     out = 1
@@ -1024,18 +1059,50 @@ def aggregate_weights(
 # save and load circuit utils
 ##########
 
-def save_circuit(save_dir, nodes, edges, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
+def save_circuit(save_dir, nodes, edges, num_examples, dataset_name=None, model_name=None, node_threshold=None, edge_threshold=None):
     save_dict = {
         "nodes" : dict(nodes),
         "edges" : dict(edges)
     }
-    save_basename = f"{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}"
+    if dataset_name is not None:
+        save_basename = f"{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}"
+    else:
+        save_basename = f"{num_examples}"
 
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     with open(f'{save_dir}{save_basename}.pt', 'wb') as outfile:
         t.save(save_dict, outfile)
+
+def load_latest(save_dir, merge_gpus=True):
+    files = os.listdir(save_dir)
+    
+    if merge_gpus:
+        gpu_dirs = [f for f in files if os.path.isdir(f'{save_dir}{f}') and (f.startswith('gpu') or f.startswith('cuda'))]
+
+        tot_circuit = None
+        for gpu in gpu_dirs:
+            circuit = load_latest(f'{save_dir}{gpu}/', merge_gpus=False)
+            if tot_circuit is None:
+                tot_circuit = circuit
+            else:
+                for k, v in circuit[0].items():
+                    if v is not None:
+                        tot_circuit[0][k] = SparseAct.maximum(tot_circuit[0][k], v)
+                for ku, vu in circuit[1].items():
+                    for kd, vd in vu.items():
+                        if vd is not None:
+                            tot_circuit[1][ku][kd] = sparse_coo_maximum(tot_circuit[1][ku][kd], vd)
+        return tot_circuit
+
+    else:
+        files = [f for f in files if f.endswith('.pt')]
+        files = sorted(files)
+        if len(files) == 0:
+            raise ValueError("No files found in save directory")
+        latest_file = files[-1]
+        return load_from(f'{save_dir}{latest_file}')
 
 def load_circuit(save_dir, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
     path = f'{save_dir}{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}.pt'

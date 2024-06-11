@@ -320,6 +320,7 @@ def faithfulness(
         patch=None,
         ablation_fn=None,
         default_ablation='mean',
+        get_graph_info=True,
     ):
     """
     model : nnsight model
@@ -372,7 +373,7 @@ def faithfulness(
 
     # get metric on original model
     with model.trace(clean):
-        clean_logits = model.output[0][:,-1,:].save()
+        clean_logits = model.output[0][torch.arange(metric_fn_kwargs['trg'][0].numel()), metric_fn_kwargs['trg'][0]].save()
         if isinstance(metric_fn, dict):
             metric = {}
             for name, fn in metric_fn.items():
@@ -413,12 +414,13 @@ def faithfulness(
         mask = get_mask(circuit, threshold)
         pruned = prune(mask)
 
-        results[threshold]['n_nodes'] = get_n_nodes(pruned)
-        results[threshold]['n_edges'] = get_n_edges(pruned)
-        results[threshold]['avg_degree'] = results[threshold]['n_edges'] / results[threshold]['n_nodes']
-        results[threshold]['density'] = get_density(pruned)
-        # TODO : results[threshold]['modularity'] = modularity, as in kaarel, as in modularity in NN paper, as in me
-        #        results[threshold]['z_score'] = Z_score(pruned)
+        if get_graph_info:
+            results[threshold]['n_nodes'] = get_n_nodes(pruned)
+            results[threshold]['n_edges'] = get_n_edges(pruned)
+            results[threshold]['avg_deg'] = results[threshold]['n_edges'] / results[threshold]['n_nodes']
+            results[threshold]['density'] = get_density(pruned)
+            # TODO : results[threshold]['modularity'] = modularity, as in kaarel, as in modularity in NN paper, as in me
+            #        results[threshold]['z_score'] = Z_score(pruned)
             
         threshold_result = run_graph(
             model,
@@ -949,7 +951,7 @@ def modularity(
         raise NotImplementedError(f"Method {method} is not implemented")
 
     # get quality
-    quality = nk.community.Modularity().getQuality(communities, G)
+    modularity = nk.community.modularity(G, communities)
 
     subset_ids = communities.getSubsetIds()
     dict_communities = {
@@ -973,4 +975,4 @@ def modularity(
     # normalize by number of nodes ? larger communities are more likely to have better scores... choose whether to do it or not based on dict_communities
     avg_single_community_modularity = sum([v['score'] * v['n_nodes'] for v in dict_communities.values()]) / sum([v['n_nodes'] for v in dict_communities.values()])
 
-    return dict_communities, avg_single_community_modularity, quality
+    return dict_communities, avg_single_community_modularity, modularity

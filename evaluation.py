@@ -170,7 +170,7 @@ def run_graph(
 
     # get patch hidden states
     patch_states = get_hidden_states(model, submodules, sae_dict, is_tuple, patch)
-    patch_states = {k : ablation_fn(v) for k, v in patch_states.items()}
+    patch_states = {k : ablation_fn(v).clone() for k, v in patch_states.items()}
 
     # forward through the model by computing each node as described by the graph and not as the original model does
 
@@ -185,7 +185,7 @@ def run_graph(
         # get downstream dict, output, ...
         downstream_dict = sae_dict[downstream]
         down_name = mod2name[downstream]
-
+        print(f"Computing {down_name}")
         # TOD? : this surely can be replaced by a single call to trace, or none at all
         with model.trace(clean):
             if input_is_tuple[downstream]:
@@ -205,8 +205,11 @@ def run_graph(
         x_hat, f = downstream_dict(x, output_features=True)
         res = x - x_hat
 
+        print("Got x_hat and f")
+
         # if downstream is embed, there is no upstream and the result stays unchanged
         if down_name == 'embed' or downstream == submodules[0]:
+            print("Embed or first layer")
             hidden_states[downstream] = SparseAct(act=f, res=res)
             continue
 
@@ -223,6 +226,7 @@ def run_graph(
         # TOD? : for features whose masks are all zeros, skip and keep only the patch state
         
         potentially_alive = torch.zeros(f.shape[-1] + 1, device=f.device, dtype=torch.bool)
+
         for up_name in circuit[down_name]:
             upstream = name2mod[up_name]
             mask = circuit[down_name][up_name] # shape (f_down + 1, f_up + 1)
@@ -232,9 +236,11 @@ def run_graph(
             upstream_hidden = upstream_hidden.abs().amax(dim=(0, 1)) # shape (f_up)
             up_nz = torch.cat([upstream_hidden > 0, torch.tensor([True], device=f.device)]) # shape (f_up + 1). Always keep the res feature alive
             
+            print("Number of potentially alive features upstream : ", up_nz.sum().item())
             compiled_loop_pot_ali(mask.indices(), potentially_alive, up_nz)
 
         potentially_alive = potentially_alive.nonzero().squeeze(1)
+        print("Number of potentially alive features downstream : ", potentially_alive.size(0))
 
         f[...] = patch_states[downstream].act # shape (batch, seq_len, f_down)
         for f_ in potentially_alive:
@@ -372,6 +378,9 @@ def faithfulness(
     results = {}
 
     # get metric on original model
+    print("Printing clean :")
+    print(type(clean))
+    print(clean)
     with model.trace(clean):
         clean_logits = model.output[0][torch.arange(metric_fn_kwargs['trg'][0].numel()), metric_fn_kwargs['trg'][0]].save()
         if isinstance(metric_fn, dict):
@@ -383,9 +392,13 @@ def faithfulness(
                     metric[name] = fn(model, **metric_fn_kwargs).save()
         else:
             metric = metric_fn(model, **metric_fn_kwargs).save()
+    
+    print("Metric is : ", type(metric))
     if isinstance(metric, dict):
         results['complete'] = {}
+        print("Metric is a dict")
         for name, value in metric.items():
+            print(f"Metric {name} : {value.value.mean().item()}")
             results['complete'][name] = value.value.mean().item()
     else:
         results['complete'] = metric.value.mean().item()
@@ -408,7 +421,8 @@ def faithfulness(
     results['empty'] = empty
 
     # get metric on thresholded graph
-    for threshold in thresholds:
+    for i, threshold in enumerate(thresholds):
+        print(f"Threshold {i+1}/{len(thresholds)} : {threshold}")
         results[threshold] = {}
 
         mask = get_mask(circuit, threshold)
@@ -417,7 +431,7 @@ def faithfulness(
         if get_graph_info:
             results[threshold]['n_nodes'] = get_n_nodes(pruned)
             results[threshold]['n_edges'] = get_n_edges(pruned)
-            results[threshold]['avg_deg'] = results[threshold]['n_edges'] / results[threshold]['n_nodes']
+            results[threshold]['avg_deg'] = results[threshold]['n_edges'] / (results[threshold]['n_nodes'] if results[threshold]['n_nodes'] > 0 else 1)
             results[threshold]['density'] = get_density(pruned)
             # TODO : results[threshold]['modularity'] = modularity, as in kaarel, as in modularity in NN paper, as in me
             #        results[threshold]['z_score'] = Z_score(pruned)
@@ -460,7 +474,7 @@ def faithfulness(
                 elif name == "KL":
                     results[threshold]['faithfulness'][name] = threshold_result[name]
                 else:
-                    results[threshold]['faithfulness'][name] = (threshold_result[name] - empty[name]) / (metric[name] - empty[name])
+                    results[threshold]['faithfulness'][name] = (threshold_result[name] - empty[name]) / (results['complete'][name] - empty[name])
         else:
             results[threshold]['faithfulness'] = (threshold_result - empty) / (metric - empty)
     
@@ -499,7 +513,7 @@ def to_Digraph(circuit, discard_res=False, discard_y=False):
                             if discard_res and u == edges[upstream][downstream].size(0) - 1:
                                 continue
                             upstream_name = f"{upstream}_{u}"
-                            G.add_edge(upstream_name, downstream)
+                            G.add_edge(upstream_name, downstream, weight=edges[upstream][downstream][u].item())
                         continue
                 for d, u in edges[upstream][downstream].coalesce().indices().t():
                     d = d.item()
@@ -514,7 +528,7 @@ def to_Digraph(circuit, discard_res=False, discard_y=False):
                     
                     upstream_name = f"{upstream}_{u}"
                     downstream_name = f"{downstream}_{d}"
-                    G.add_edge(upstream_name, downstream_name)
+                    G.add_edge(upstream_name, downstream_name, weight=edges[upstream][downstream][d, u].item())
 
         return G
 
@@ -628,7 +642,7 @@ def prune_sparse_coos(
             idx = new_edges.indices()[0].unique()
             reachable[downstream] += torch.sparse_coo_tensor(
                 idx.unsqueeze(0),
-                torch.ones(idx.size(0)),
+                torch.ones(idx.size(0), ),
                 (size[downstream],),
                 device=circuit[upstream][downstream].device
             )
@@ -682,10 +696,16 @@ def get_n_nodes(G):
     elif isinstance(G, dict):
         n_nodes = 0
         for up in G:
-            up_nodes = torch.empty(0, dtype=torch.long)
+            up_nodes = None
             for down in G[up]:
-                nodes = G[up][down].indices()[1].unique()
-                up_nodes = torch.cat([up_nodes, nodes])
+                if down == 'y':
+                    nodes = G[up][down].indices()[0].unique()
+                else:
+                    nodes = G[up][down].indices()[1].unique()
+                if up_nodes is None:
+                    up_nodes = nodes
+                else:
+                    up_nodes = torch.cat([up_nodes, nodes])
             n_nodes += up_nodes.unique().size(0)
         return n_nodes
     else :
@@ -724,7 +744,7 @@ def get_density(edges):
     for up in edges:
         for down in edges[up]:
             n_edges += edges[up][down].values().size(0)
-            max_edges += edges[up][down].size(0) * edges[up][down].size(1)
+            max_edges += edges[up][down].size(0) * (edges[up][down].size(1) if down != 'y' else 1)
     return n_edges / max_edges
 
 def get_global_clustering_coefficient(G):
@@ -740,12 +760,12 @@ def get_s_metric(G):
     return nx.s_metric(G)
 
 @torch.no_grad()
-def sparsity(
+def evaluate_graph(
     circuit,
     prune=False,
 ):
     """
-    circuit : tuple (nodes, edges), dict or nx.DiGraph or nk.Graph
+    circuit : tuple (nodes, edges), dict (edges), nx.DiGraph or nk.Graph
     returns a dict
         'nedges' -> int
         'nnodes' -> int
@@ -778,11 +798,34 @@ def sparsity(
         'connected_components' : get_connected_components(G),
         'density' : get_density(circuit),
         'degree_distribution' : get_degree_distribution(G),
+        'modularity' : modularity(G),
+        #'z_score' : Z_score(circuit),
     }
+
+    print("Everything after this is for random graphs")
+
+    mu, sigma = mean_std_clusterability(circuit, 1)
+    results['mean_modularity'] = mu
+    results['std_modularity'] = sigma
+    results['z_score'] = (results['modularity'] - mu) / sigma
+
+    # print("Computing modularity")
+    # results['modularity'] = modularity(G)
+    # print(f"Modularity : {results['modularity']}")
+
+    # print("Computing modularity")
+    # G_unweighted = G.copy()
+    # for u, v in G_unweighted.edges:
+    #     G_unweighted[u][v]['weight'] = 1
+    # results['modularity'] = modularity(G_unweighted)
+    # print(f"Modularity : {results['modularity']}")
+    # print("Computing treewidth")
+    # results['treewidth'] = nx.approximation.treewidth_min_degree(nx.Graph(G))
+    # print(f"Treewidth : {results['treewidth']}")
 
     if prune:
         pruned_circuit = prune(G)
-        pruned = sparsity(pruned_circuit)
+        pruned = evaluate_graph(pruned_circuit)
         results['pruned'] = pruned
 
     return results
@@ -796,6 +839,11 @@ def shuffle_edges(edges):
     for up in edges:
         new_edges[up] = {}
         for down in edges[up]:
+            if down == 'y':
+                new_edges[up][down] = edges[up][down]
+                perm = torch.randperm(edges[up][down].values().size(0))
+                new_edges[up][down].values()[...] = edges[up][down].values()[perm]
+                continue
             up_alive = edges[up][down].indices()[1].unique()
             down_alive = edges[up][down].indices()[0].unique()
             n_edges = edges[up][down].values().size(0)
@@ -822,9 +870,11 @@ def mean_std_clusterability(edges, n_samples=50):
     returns a tuple (mean, std) of the clusterability of the graph
     """
     clusterabilities = []
-    for _ in range(n_samples):
+    from tqdm import tqdm
+    for _ in tqdm(range(n_samples)):
         shuffled_edges = shuffle_edges(edges)
-        clusterabilities.append(modularity(shuffled_edges)[1])
+        clusterabilities.append(modularity(shuffled_edges))#[1])
+        print(clusterabilities[-1])
     return torch.tensor(clusterabilities).mean().item(), torch.tensor(clusterabilities).std().item()
 
 def Z_score(edges, n_samples=50):
@@ -833,7 +883,7 @@ def Z_score(edges, n_samples=50):
     returns a tuple (mean, std) of the clusterability of the graph
     """
     mean, std = mean_std_clusterability(edges, n_samples)
-    return (modularity(edges)[1] - mean) / std
+    return (modularity(edges)-mean)/std#[1] - mean) / std
 
 # TODO : look into normalised cut paper to define a global metric similar to that.
 # TODO : do that from clusterability in NN :
@@ -892,7 +942,22 @@ def single_community_modularity(G, C, weighted=False, output_n_edges=False):
             return sum1, sum1 / sum2
         return sum1 / sum2
     else:
-        raise NotImplementedError
+        sum1 = 0
+        sum2 = 0
+        def sum_fct(u, v, w, edgeId):
+            nonlocal sum1, sum2
+            if u in C and v in C:
+                sum1 += w
+            if u in C or v in C:
+                sum2 += w
+        G.forEdges(sum_fct)
+        if sum2 == 0:
+            if output_n_edges:
+                return sum1, 0
+            return 0
+        if output_n_edges:
+            return sum1, sum1 / sum2
+        return sum1 / sum2
 
 # TOD? : plot leiden results wrt iterations (or plot [quality o (communities o to_merged_graph)^n](communities)) : do communities of communities
 @torch.no_grad()
@@ -900,8 +965,8 @@ def modularity(
     circuit,
     method='Leiden',
     iterations=10,
-    gamma=1.0,
-    weighted=False,
+    gamma=1.0, # 0 : single community, 1 : default, 2m : singletons
+    weighted=True,
     log_weighted=False,
 ):
     """
@@ -928,15 +993,8 @@ def modularity(
     except:
         pass
 
-    G = nk.nxadapter.nx2nk(circuit)
+    G = nk.nxadapter.nx2nk(circuit, weightAttr='weight' if weighted else None)
     G = nk.graphtools.toUndirected(G)
-        
-    if weighted:
-        raise NotImplementedError
-        if log_weighted:
-            G = nk.graphtools.toWeighted(G, edge_weight_log=True)
-        else:
-            G = nk.graphtools.toWeighted(G)
 
     # get communities
     if method == 'Leiden':
@@ -951,13 +1009,14 @@ def modularity(
         raise NotImplementedError(f"Method {method} is not implemented")
 
     # get quality
-    modularity = nk.community.modularity(G, communities)
+    modularity = nk.community.Modularity().getQuality(communities, G)
 
     subset_ids = communities.getSubsetIds()
+    print(f"Weighted : {weighted}, log weighted : {log_weighted}")
     dict_communities = {
         subset_id : {
             'n_nodes' : len(communities.getMembers(subset_id)),
-            'score' : single_community_modularity(G, communities.getMembers(subset_id), weighted=weighted, output_n_edges=True)
+            #'score' : single_community_modularity(G, communities.getMembers(subset_id), weighted=weighted, output_n_edges=True)
         }
         for subset_id in subset_ids
     }
@@ -967,12 +1026,17 @@ def modularity(
         if dict_communities[subset_id]['n_nodes'] == 1:
             to_del.append(subset_id)
             continue
-        dict_communities[subset_id]['n_edges'], dict_communities[subset_id]['score'] = dict_communities[subset_id]['score']
+        #dict_communities[subset_id]['n_edges'], dict_communities[subset_id]['score'] = dict_communities[subset_id]['score']
     
+    print(f"N singletons : {len(to_del)}")
     for subset_id in to_del:
         del dict_communities[subset_id]
 
     # normalize by number of nodes ? larger communities are more likely to have better scores... choose whether to do it or not based on dict_communities
-    avg_single_community_modularity = sum([v['score'] * v['n_nodes'] for v in dict_communities.values()]) / sum([v['n_nodes'] for v in dict_communities.values()])
+    #avg_single_community_modularity = sum([v['score'] * v['n_nodes'] for v in dict_communities.values()]) / sum([v['n_nodes'] for v in dict_communities.values()])
 
-    return dict_communities, avg_single_community_modularity, modularity
+    print(f"Modularity : {modularity}")#, avg single community modularity : {avg_single_community_modularity}")
+    print(f"Number of communities : {len(list(dict_communities.keys()))}")
+    print(f"Communities : {dict_communities}")
+
+    return modularity

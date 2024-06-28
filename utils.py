@@ -2,6 +2,7 @@ from __future__ import annotations
 from graphviz import Digraph
 from collections import defaultdict
 import os
+from datetime import datetime
 import json
 import random
 import torch as t
@@ -256,7 +257,6 @@ class SparseAct():
                 kwargs[attr] = t.zeros_like(getattr(other, attr))
         return SparseAct(**kwargs)
 
-    
     def to_tensor(self):
         if self.resc is None:
             return t.cat([self.act, self.res], dim=-1)
@@ -271,6 +271,16 @@ class SparseAct():
                 pass
             return t.cat([self.act, self.resc], dim=-1)
         raise ValueError("SparseAct has both residual and contracted residual. This is an unsupported state.")
+
+    @property
+    def device(self):
+        if self.act is not None:
+            return self.act.device
+        if self.res is not None:
+            return self.res.device
+        if self.resc is not None:
+            return self.resc.device
+        return None
 
     def to(self, device):
         for attr in ['act', 'res', 'resc']:
@@ -851,6 +861,7 @@ def sparse_coo_max(x, dim):
 
     idxs = x.indices() # [len(x_shape), n]
     new_idxs = t.cat((idxs[:dim], idxs[dim+1:]), dim=0) # [len(x_shape)-1, n]
+    # TODO : here and in maximum, iterate only over values that are not unique. Define new_values as cat, and then take new_values = new_values[...], and itterate only where ... has count > 1
     new_idxs, inverse = new_idxs.unique(dim=-1, return_inverse=True)
     new_values = t.full((new_idxs.shape[1],), get_min_value(x.dtype), dtype=x.dtype, device=x.device)
 
@@ -876,7 +887,7 @@ def sparse_coo_amax(x, dim):
 @t.jit.script
 def compile_for_loop_sparse_coo_maximum(new_indices, new_values, indices, values):
     for i, idx in enumerate(indices.t()):
-        mask = (new_indices == idx).all(dim=1)
+        mask = (new_indices.t() == idx).all(dim=1)
         new_values[mask] = t.max(new_values[mask], values[i])
 
 def sparse_coo_maximum(x, y):
@@ -953,6 +964,16 @@ def sparse_reshape(x, shape):
     new_indices = reshape_index(x.indices()[0], shape)
     return t.sparse_coo_tensor(new_indices.t(), x.values(), shape)
 
+def sparse_permute(x, perm):
+    """
+    x : a sparse COO tensor
+    perm : a permutation of the dimensions
+    return x permuted according to perm
+    """
+    x = x.coalesce()
+    new_indices = x.indices()[list(perm)]
+    return t.sparse_coo_tensor(new_indices, x.values(), tuple(x.shape[perm[i]] for i in range(len(perm))))
+
 def rearrange_weights(nodes, edges):
     # rearrange weight matrices
     for child in edges:
@@ -968,92 +989,84 @@ def rearrange_weights(nodes, edges):
                 weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
             edges[child][parent] = weight_matrix
 
+def _save_all_batch(nodes, edges, aggregation, base_dir=None):
+    # TODO : save also the sequence, trg idx and trg
+    for child in edges:
+        b, _ = nodes[child].act.shape
+        break
+
+    for k in range(b):
+        k_edges = {}
+        for child in edges:
+            k_edges[child] = {}
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = weight_matrix[k]
+                else:
+                    weight_matrix = weight_matrix[k] # shape (fp, bc, fc)
+                    # rearrange to (bc, fp, fc)
+                    weight_matrix = sparse_permute(weight_matrix, (1, 0, 2))[k]
+                k_edges[child][parent] = weight_matrix
+        
+        # save at base directory plus a unique identifier using the current time
+        if base_dir is None:
+            base_dir = f'/scratch/pyllm/dhimoila/output/dumped_circuits/{aggregation}/'
+        if not os.path.exists(base_dir):
+            os.makedirs(base_dir)
+        now = datetime.now()
+        unique_id = now.strftime("%Y%m%d_%H%M%S%f")
+        file_name = f"{unique_id}.pt"
+        save_dir = {
+            "edges" : k_edges,
+        }
+        with open(f'{base_dir}{file_name}', 'wb') as outfile:
+            t.save(save_dir, outfile)
+
 def aggregate_weights(
-    nodes, edges, aggregation='max'
+    nodes, edges, aggregation='max', dump_all=False, save_path=None
 ):
     if aggregation == 'sum':
-        # aggregate across sequence position
-        for child in edges:
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = weight_matrix.sum(dim=1)
-                else:
-                    weight_matrix = weight_matrix.sum(dim=(1, 4))
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            if node != 'y':
-                nodes[node] = nodes[node].sum(dim=1)
+        w_y_s_fct = lambda w, b: w.sum(dim=1)
+        w_s_fct = lambda w, b: w.sum(dim=(1, 4))
+        n_s_fct = lambda n: n.sum(dim=1)
 
-        # aggregate across batch dimension
-        for child in edges:
-            bc, fc = nodes[child].act.shape
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = weight_matrix.sum(dim=0) / bc
-                else:
-                    bp, fp = nodes[parent].act.shape
-                    assert bp == bc
-                    weight_matrix = weight_matrix.sum(dim=(0,2)) / bc
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            if node != 'y':
-                nodes[node] = nodes[node].mean(dim=0)
-    
+        w_y_b_fct = lambda w, b: w.sum(dim=0) / b
+        w_b_fct = lambda w, b: w.sum(dim=(0, 2)) / b # TODO : shouldn't this be / (b**2) ?
+        n_b_fct = lambda n: n.mean(dim=0)
     elif aggregation == 'max':
-        # aggregate across sequence position
-        for child in edges:
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = sparse_coo_amax(weight_matrix, dim=1)
-                else:
-                    weight_matrix = sparse_coo_amax(weight_matrix, dim=(1, 4))
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            if node != 'y':
-                nodes[node] = nodes[node].amax(dim=1)
+        w_y_s_fct = lambda w, b: sparse_coo_amax(w, dim=1)
+        w_s_fct = lambda w, b: sparse_coo_amax(w, dim=(1, 4))
+        n_s_fct = lambda n: n.amax(dim=1)
 
-        # aggregate across batch dimension
-        for child in edges:
-            bc, fc = nodes[child].act.shape
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = sparse_coo_amax(weight_matrix, dim=0)
-                else:
-                    bp, fp = nodes[parent].act.shape
-                    assert bp == bc
-                    weight_matrix = sparse_coo_amax(weight_matrix, dim=(0,2))
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            if node != 'y':
-                nodes[node] = nodes[node].amax(dim=0)
-
-
-    elif aggregation == 'none':
-
-        # aggregate across batch dimensions
-        for child in edges:
-            # get shape for child
-            bc, sc, fc = nodes[child].act.shape
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
-                    weight_matrix = weight_matrix.sum(dim=0) / bc
-                else:
-                    bp, sp, fp = nodes[parent].act.shape
-                    assert bp == bc
-                    weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
-                    weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            nodes[node] = nodes[node].mean(dim=0)
-
+        w_y_b_fct = lambda w, b: sparse_coo_amax(w, dim=0)
+        w_b_fct = lambda w, b: sparse_coo_amax(w, dim=(0, 2))
+        n_b_fct = lambda n: n.amax(dim=0)
     else:
         raise ValueError(f"Unknown aggregation: {aggregation}")
+
+    def _aggregate(w_y_fct, w_fct, n_fct):
+        for child in edges:
+            shape = nodes[child].act.shape
+            b = shape[0]
+            for parent in edges[child]:
+                weight_matrix = edges[child][parent]
+                if parent == 'y':
+                    weight_matrix = w_y_fct(weight_matrix, b)
+                else:
+                    weight_matrix = w_fct(weight_matrix, b)
+                edges[child][parent] = weight_matrix
+        for node in nodes:
+            if node != 'y':
+                nodes[node] = n_fct(nodes[node])
+
+    # aggregate across sequence position
+    _aggregate(w_y_s_fct, w_s_fct, n_s_fct)
+    # dump all examples
+    if dump_all:
+        _save_all_batch(nodes, edges, aggregation, base_dir=save_path)
+    # aggregate across batch dimension
+    _aggregate(w_y_b_fct, w_b_fct, n_b_fct)
 
 ##########
 # save and load circuit utils
@@ -1064,6 +1077,11 @@ def save_circuit(save_dir, nodes, edges, num_examples, dataset_name=None, model_
         "nodes" : dict(nodes),
         "edges" : dict(edges)
     }
+    node_threshold = str(node_threshold) if node_threshold is not None else 'None'
+    node_threshold = node_threshold.replace('.', '_')
+    edge_threshold = str(edge_threshold) if edge_threshold is not None else 'None'
+    edge_threshold = edge_threshold.replace('.', '_')
+
     if dataset_name is not None:
         save_basename = f"{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}"
     else:
@@ -1075,42 +1093,70 @@ def save_circuit(save_dir, nodes, edges, num_examples, dataset_name=None, model_
     with open(f'{save_dir}{save_basename}.pt', 'wb') as outfile:
         t.save(save_dict, outfile)
 
-def load_latest(save_dir, merge_gpus=True):
+def load_latest(save_dir, merge_gpus=True, device=None):
     files = os.listdir(save_dir)
+
+    none_to_merge = True
+    for f in files:
+        if os.path.isdir(f'{save_dir}{f}') and (f.startswith('gpu') or f.startswith('cuda')):
+            none_to_merge = False
+            break
+    if none_to_merge:
+        merge_gpus = False
     
     if merge_gpus:
         gpu_dirs = [f for f in files if os.path.isdir(f'{save_dir}{f}') and (f.startswith('gpu') or f.startswith('cuda'))]
 
         tot_circuit = None
         for gpu in gpu_dirs:
+            print(f"Loading from {gpu}...", end='')
             circuit = load_latest(f'{save_dir}{gpu}/', merge_gpus=False)
             if tot_circuit is None:
                 tot_circuit = circuit
             else:
                 for k, v in circuit[0].items():
                     if v is not None:
-                        tot_circuit[0][k] = SparseAct.maximum(tot_circuit[0][k], v)
+                        d = device if device is not None else v.device
+                        if type(v) == t.Tensor:
+                            tot_circuit[0][k] = t.maximum(tot_circuit[0][k].to(d), v.to(d))
+                        else:
+                            tot_circuit[0][k] = SparseAct.maximum(tot_circuit[0][k].to(d), v.to(d))
                 for ku, vu in circuit[1].items():
                     for kd, vd in vu.items():
                         if vd is not None:
-                            tot_circuit[1][ku][kd] = sparse_coo_maximum(tot_circuit[1][ku][kd], vd)
+                            d = device if device is not None else vd.device
+                            tot_circuit[1][ku][kd] = sparse_coo_maximum(tot_circuit[1][ku][kd].to(d), vd.to(d))
+            print(' done')
+
+        save_circuit(save_dir + 'merged/', *tot_circuit, 0)
         return tot_circuit
 
     else:
-        files = [f for f in files if f.endswith('.pt')]
-        files = sorted(files)
+        files = [save_dir + f for f in files if f.endswith('.pt')]
+        files = sorted(files, key=os.path.getmtime)
         if len(files) == 0:
-            raise ValueError("No files found in save directory")
+            raise ValueError(f"No files found in save directory {save_dir}")
         latest_file = files[-1]
-        return load_from(f'{save_dir}{latest_file}')
+        return load_from(f'{latest_file}', device=device)
 
 def load_circuit(save_dir, dataset_name, model_name, node_threshold, edge_threshold, num_examples):
     path = f'{save_dir}{dataset_name}_{model_name}_node{node_threshold}_edge{edge_threshold}_n{num_examples}.pt'
     return load_from(path)
 
-def load_from(circuit_path):
+def load_from(circuit_path, device=None):
     with open(circuit_path, 'rb') as infile:
-        save_dict = t.load(infile)
-    nodes = save_dict['nodes']
+        save_dict = t.load(infile, map_location=t.device('cpu'))
+    try:
+        nodes = save_dict['nodes']
+    except KeyError:
+        nodes = None
     edges = save_dict['edges']
+
+    if device is not None:
+        for k, v in nodes.items():
+            nodes[k] = v.to(device)
+        for k, v in edges.items():
+            for kk, vv in v.items():
+                edges[k][kk] = vv.to(device)
+
     return nodes, edges

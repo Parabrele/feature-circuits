@@ -90,6 +90,7 @@ def y_effect(
 
     return effect, max_effect
 
+@t.no_grad()
 def get_effect(
     model,
     clean,
@@ -128,45 +129,44 @@ def get_effect(
         dictionary = dictionaries[upstream_submod]
         clean_state = hidden_states_clean[upstream_submod]
         patch_state = hidden_states_patch[upstream_submod]
-
-        fs_grads = [0 for _ in range(len(downstream_features))]
         
+        Jack = 0
+
         for step in range(steps):
             alpha = step / steps
-            upstream_act = (1 - alpha) * clean_state + alpha * patch_state
-            upstream_act.act.retain_grad()
-            upstream_act.res.retain_grad()
+            upstream_act = (1 - alpha) * clean_state + alpha * patch_state # act shape (batch_size, seq_len, n_features) res shape (batch_size, seq_len, d_model)
+
+            n_features = upstream_act.act.size(-1)
             
-            with model.trace(clean, **tracer_kwargs):
-                if is_tuple[upstream_submod]:
-                    upstream_submod.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
-                else:
-                    upstream_submod.output = dictionary.decode(upstream_act.act) + upstream_act.res
+            def __jacobian_forward(act_res):
+                act = act_res[..., :n_features]
+                res = act_res[..., n_features:]
+                with model.trace(clean, **tracer_kwargs):
+                    if is_tuple[upstream_submod]:
+                        upstream_submod.output[0][:] = dictionary.decode(act) + res
+                    else:
+                        upstream_submod.output = dictionary.decode(act) + res
+                    
+                    y = downstream_submod.output
+                    if is_tuple[downstream_submod]:
+                        y = y[0]
+                    y_hat, g = downstream_dict(y, output_features=True)
+                    y_res = y - y_hat
+                    # the left @ down in the original code was at least useful to populate .resc instead of .res. I should just du .resc = norm of .res :
+                    # all values represent the norm of their respective feature, so if we consider .res as a feature, then we should indeed
+                    # consider its norm as the node.
+                    # /!\ do the .to_tensor().flatten() outside of the with in order for the proxies to be populated and .to_tensor() to not crash
+                    downstream_act = SparseAct(
+                        act=g,
+                        resc=t.norm(y_res, dim=-1)
+                    ).save()
                 
-                y = downstream_submod.output
-                if is_tuple[downstream_submod]:
-                    y = y[0]
-                y_hat, g = downstream_dict(y, output_features=True)
-                y_res = y - y_hat
-                # the left @ down in the original code was at least useful to populate .resc instead of .res. I should just du .resc = norm of .res :
-                # all values represent the norm of their respective feature, so if we consider .res as a feature, then we should indeed
-                # consider its norm as the node.
-                # /!\ do the .to_tensor().flatten() outside of the with in order for the proxies to be populated and .to_tensor() to not crash
-                downstream_act = SparseAct(
-                    act=g,
-                    resc=t.norm(y_res, dim=-1)
-                ).save()
+                downstream_act = downstream_act.to_tensor().flatten()
+                downstream_act = downstream_act[downstream_features]
+                return downstream_act
             
-            downstream_act = downstream_act.to_tensor().flatten()
-            
-            for i, downstream_feat in enumerate(downstream_features):
-                downstream_act[downstream_feat].backward(retain_graph=True)
-                fs_grads[i] += SparseAct(
-                    act=upstream_act.act.grad,
-                    res=upstream_act.res.grad
-                )
-                upstream_act.act.grad = t.zeros_like(upstream_act.act)
-                upstream_act.res.grad = t.zeros_like(upstream_act.res)
+            # Jack shape : outshape x inshape = (# downstream features, batch_size, seq_len, n_features)
+            Jack = t.autograd.functional.jacobian(__jacobian_forward, t.cat([upstream_act.act, upstream_act.res], dim=-1)) + Jack
 
         # get shapes
         d_downstream_contracted = t.tensor(hidden_states_clean[downstream_submod].act.size())
@@ -180,7 +180,13 @@ def get_effect(
         max_effect = None
 
         # TODO : try to compile that loop
-        for downstream_feat, fs_grad in zip(downstream_features, fs_grads):
+        for downstream_feat, fs_grad in zip(downstream_features, Jack):
+            # fs_grad has shape (batch_size, seq_len, n_features + d_model) as it was concatenated for the jacobian
+            # split it in a SparseAct{act : (batch_size, seq_len, n_features), res : (batch_size, seq_len, d_model)}
+            fs_grad = SparseAct(
+                act=fs_grad[..., :n_features],
+                res=fs_grad[..., n_features:]
+            )
             grad = fs_grad / steps
             delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
             effect = (grad @ delta).abs()

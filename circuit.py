@@ -49,6 +49,8 @@ def get_circuit(
     edge_threshold=0.01,
     steps=10,
     nodes_only=False,
+    dump_all=False,
+    save_path=None,
 ):
     if method not in available_methods:
         raise ValueError(f"Unknown circuit discovery method: {method}")
@@ -87,6 +89,8 @@ def get_circuit(
             aggregation=aggregation,
             edge_threshold=edge_threshold,
             steps=steps,
+            dump_all=dump_all,
+            save_path=save_path,
         )
 
 def get_circuit_resid_only(
@@ -103,6 +107,8 @@ def get_circuit_resid_only(
         aggregation='max', # or 'none' for not aggregating across sequence position
         edge_threshold=0.01,
         steps=10,
+        dump_all=False,
+        save_path=None,
 ):
     all_submods = [embed] + [submod for submod in resids]
     last_layer = resids[-1]
@@ -174,7 +180,7 @@ def get_circuit_resid_only(
         t.cuda.empty_cache()
 
     rearrange_weights(nodes, edges)
-    aggregate_weights(nodes, edges, aggregation)
+    aggregate_weights(nodes, edges, aggregation, dump_all=dump_all, save_path=save_path)
 
     return nodes, edges
 

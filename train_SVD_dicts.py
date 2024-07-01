@@ -27,7 +27,11 @@ args = parser.parse_args()
 
 device = torch.device(f'cuda:{args.device}') if torch.cuda.is_available() else torch.device('cpu')
 
+print('device:', device)
+
 base_path = '/scratch/pyllm/dhimoila/dictionaires/pythia-70m-deduped/SVDdicts/'
+
+print('starting to load...')
 
 pythia70m = LanguageModel(
     "EleutherAI/pythia-70m-deduped",

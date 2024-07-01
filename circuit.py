@@ -32,6 +32,99 @@ def marche_pas():
 
 available_methods = ['resid', 'marks', 'resid_topk']
 
+def get_activation(
+        clean,
+        model,
+        dictionaries,
+        submod_names,
+        metric_fn,
+        embed,
+        resids=None,
+        attns=None,
+        mlps=None,
+        metric_fn_kwargs={},
+        use_resid=False,
+        activation=True,
+        attribution=True,
+        aggregation="sum",
+        node_threshold=0,
+        steps=10,
+        discard_reconstruction_error=False,
+    ):
+    """
+    Returns a dict with key in "attribution" and "activation" and the corresponding vectorized attr/act values of
+    all dicts, with shape (batch_size, n_nodes).
+    TODO : do not aggregate across batch
+    TODO : project into SVD space vs whitened space
+    """
+
+    if (not attribution) and (not activation):
+        raise ValueError("You must set either attribution or activation to True")
+
+    if use_resid:
+        all_submods = [embed] + [submod for submod in resids]
+    else:
+        all_submods = [embed] + [submod for layer_submods in zip(mlps, attns) for submod in layer_submods]
+    
+    # dummy forward pass to get shapes of outputs
+    is_tuple = {}
+    with model.trace("_"), t.no_grad():
+        for submodule in all_submods:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
+
+    # get encoding and reconstruction errors for clean and patch
+    hidden_states = get_hidden_states(model, submods=all_submods, dictionaries=dictionaries, is_tuple=is_tuple, input=clean)
+
+    if aggregation == 'sum':
+        n_s_fct = lambda n: n.sum(dim=1)
+    elif aggregation == 'max':
+        n_s_fct = lambda n: n.amax(dim=1)
+    else:
+        raise ValueError(f"Unknown aggregation: {aggregation}")
+    
+    if activation:
+        # concatenate all hidden states in one big tensor of shape (batch_size, n_tokens, n_features_tot)
+        if discard_reconstruction_error:
+            hidden_concat = t.cat([v.act for v in hidden_states.values()], dim=-1)
+        else:
+            hidden_concat = t.cat([t.cat([v.act, v.res.norm(dim=-1, keepdim=True)], dim=-1) for v in hidden_states.values()], dim=-1)
+
+        # aggregate over sequence position
+        hidden_concat = n_s_fct(hidden_concat)
+
+        if not attribution:
+            return {'act' : hidden_concat}
+    
+    if attribution:
+        """
+        Compute effect of all layers on the metric.
+        """
+        effects, _, _, _ = patching_effect(
+            clean,
+            None,
+            model,
+            all_submods,
+            dictionaries,
+            metric_fn,
+            method='ig',
+            steps=steps,
+            metric_kwargs=metric_fn_kwargs
+        )
+
+        if discard_reconstruction_error:
+            attr_concat = t.cat([v.act for v in effects.values()], dim=-1)
+        else:
+            attr_concat = t.cat([t.cat([v.act, v.res.norm(dim=-1, keepdim=True)], dim=-1) for v in effects.values()], dim=-1)
+
+        # aggregate over sequence position
+        attr_concat = n_s_fct(attr_concat)
+
+        if activation:
+            return {'act' : hidden_concat, 'attr' : attr_concat}
+        else:
+            return {'attr' : attr_concat}
+    
+
 def get_circuit(
     clean,
     patch,

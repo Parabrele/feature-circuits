@@ -1,9 +1,11 @@
-from nnsight import LanguageModel
 import torch as t
-from dictionary_learning import AutoEncoder
-from dictionary_learning.dictionary import IdentityDict
 from argparse import ArgumentParser
-from utils import SparseAct, load_examples
+from nnsight import LanguageModel
+
+from utils.dictionary import AutoEncoder, IdentityDict
+
+from utils.activation import SparseAct
+from utils.utils import load_examples
 
 def run_with_ablations(
         clean, # clean inputs

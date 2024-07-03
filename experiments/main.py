@@ -129,7 +129,7 @@ import networkx as nx
 from dictionary_learning import AutoEncoder
 from dictionary_learning.dictionary import IdentityDict, SVDDictionary
 from utils import SparseAct
-from buffer import TokenBuffer
+from data.buffer import TokenBuffer
 import evaluation
 from circuit import get_circuit
 from utils import save_circuit, load_circuit, load_latest, sparse_coo_maximum

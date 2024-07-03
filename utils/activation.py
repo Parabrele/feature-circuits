@@ -1,7 +1,7 @@
-from __future__ import annotations
 import torch as t
 from torchtyping import TensorType
-from dictionary_learning import AutoEncoder
+
+from __future__ import annotations
 
 class SparseAct():
     """
@@ -154,6 +154,21 @@ class SparseAct():
         else:
             raise ValueError("SparseAct has both residual and contracted residual. This is an unsupported state.")
     
+    @staticmethod
+    def maximum(a, b):
+        kwargs = {}
+        for attr in ['act', 'res', 'resc']:
+            if getattr(a, attr) is not None:
+                kwargs[attr] = t.maximum(getattr(a, attr), getattr(b, attr))
+        return SparseAct(**kwargs)
+
+    def amax(self, dim=None):
+        kwargs = {}
+        for attr in ['act', 'res', 'resc']:
+            if getattr(self, attr) is not None:
+                kwargs[attr] = getattr(self, attr).amax(dim)
+        return SparseAct(**kwargs)
+
     def sum(self, dim=None):
         kwargs = {}
         for attr in ['act', 'res', 'resc']:
@@ -215,7 +230,15 @@ class SparseAct():
         self.act = self.act.detach()
         self.res = self.res.detach()
         return SparseAct(act=self.act, res=self.res)
-    
+
+    @staticmethod
+    def zeros_like(other):
+        kwargs = {}
+        for attr in ['act', 'res', 'resc']:
+            if getattr(other, attr) is not None:
+                kwargs[attr] = t.zeros_like(getattr(other, attr))
+        return SparseAct(**kwargs)
+
     def to_tensor(self):
         if self.resc is None:
             return t.cat([self.act, self.res], dim=-1)
@@ -230,6 +253,16 @@ class SparseAct():
                 pass
             return t.cat([self.act, self.resc], dim=-1)
         raise ValueError("SparseAct has both residual and contracted residual. This is an unsupported state.")
+
+    @property
+    def device(self):
+        if self.act is not None:
+            return self.act.device
+        if self.res is not None:
+            return self.res.device
+        if self.resc is not None:
+            return self.resc.device
+        return None
 
     def to(self, device):
         for attr in ['act', 'res', 'resc']:
@@ -260,3 +293,29 @@ class SparseAct():
     
     def abs(self):
         return self._map(lambda x, _: x.abs())
+
+DEBUGGING = False
+
+if DEBUGGING:
+    tracer_kwargs = {'validate' : True, 'scan' : True}
+else:
+    tracer_kwargs = {'validate' : False, 'scan' : False}
+
+def get_hidden_states(
+    model,
+    submods,
+    dictionaries,
+    is_tuple,
+    input,
+):
+    hidden_states = {}
+    with model.trace(input, **tracer_kwargs), t.no_grad():
+        for submodule in submods:
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+            x_hat, upstream_act = dictionary(x, output_features=True)
+            hidden_states[submodule] = SparseAct(act=upstream_act.save(), res=(x - x_hat).save())
+    hidden_states = {k : v.value for k, v in hidden_states.items()}
+    return hidden_states

@@ -3,7 +3,7 @@ import torch as t
 from tqdm import tqdm
 from numpy import ndindex
 from typing import Dict, Union
-from utils import SparseAct
+from utils.activation import SparseAct
 
 DEBUGGING = False
 
@@ -29,6 +29,9 @@ def y_effect(
     edge_threshold=0.01,
     features_by_submod={},
 ):
+    """
+    Get the last layer Integrated Gradient attribution effect on the output.
+    """
     dictionary = dictionaries[last_layer]
     clean_state = hidden_states_clean[last_layer]
     patch_state = hidden_states_patch[last_layer]
@@ -107,6 +110,8 @@ def get_effect(
     edge_threshold,
 ):
     """
+    Get the effect of some upstream module on some downstream module. Uses integrated gradient attribution.
+
     If normalise edges, divide them by their sum and take the smallest top k edges such that
     their sum is above edge_threshold * total sum or the smallest is equal to edge_threshold
     of the first one, to avoid cases where there is a shit ton of edges so the total is really big
@@ -191,11 +196,6 @@ def get_effect(
             delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
             effect = (grad @ delta).abs()
             
-            # if normalise_edges:
-            #     tot_eff = effect_values[downstream_feat].sum()
-            #     effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
-            #     effect = effect / tot_eff
-            
             flat_effect = effect.to_tensor().flatten()
 
             if normalise_edges:
@@ -253,7 +253,7 @@ def get_effect(
         ), max_effect
 
 ##########
-# Marks functions
+# Marks et al. functions. Here for compatibility.
 ##########
 
 def _pe_attrib(

@@ -37,7 +37,7 @@ print("Done.")
 clean = "When Mary and John went to the store, John gave a drink to"
 trg_idx = torch.tensor([-1]).to(device)
 trg_str = " Mary"
-trg = torch.tensor(pythia70m.tokenizer.encode(trg_str)[0], device=device)
+trg = torch.tensor([pythia70m.tokenizer.encode(trg_str)[0]], device=device)
 
 print("clean:", clean)
 print("trg_str:", trg_str)
@@ -48,6 +48,7 @@ print("trg_idx:", trg_idx)
 
 from connectivity.effective import get_circuit
 
+print("Getting circuit...")
 circuit = get_circuit(
     clean,
     None,
@@ -57,12 +58,15 @@ circuit = get_circuit(
     dictionaries=dictionaries,
     metric_fn=metric_fn_logit,
     metric_kwargs={"trg": (trg_idx, trg)},
-    edge_threshold=0.1,
+    edge_threshold=0.01,
 )
+print("Done.")
 
 # evaluate the circuit
 
-start_at_layer = 0
+# start at layer : starting from the embedding layer can be surprisingly bad in some cases, so starting a little bit after might help.
+
+start_at_layer = 1
 
 submodules = [pythia70m_embed] if start_at_layer == -1 else []
 for i in range(max(start_at_layer, 0), len(pythia70m.gpt_neox.layers)):
@@ -70,6 +74,7 @@ for i in range(max(start_at_layer, 0), len(pythia70m.gpt_neox.layers)):
 
 from evaluation.faithfulness import faithfulness
 
+print("Evaluating faithfulness...")
 thresholds = torch.logspace(-2, 2, 15, 10).tolist()
 faith = faithfulness(
     pythia70m,
@@ -85,10 +90,11 @@ faith = faithfulness(
     default_ablation='zero',
     get_graph_info=True,
 )
+print("Done.")
 
 # Plot the results :
 
 from utils.plotting import plot_faithfulness
 
-save_path = "/scratch/pyllm/dhimoila/test_correctness/"
+save_path = f"/scratch/pyllm/dhimoila/effective_correctness/esal{start_at_layer}/"
 plot_faithfulness(faith, metric_fn_dict, save_path)

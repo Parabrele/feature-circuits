@@ -1,16 +1,3 @@
-"""
-For future usage with different kinds of SAEs (like LIB, gated, etc.), nothing has to change except load_saes function.
-Also, currently the code is specific to pythia-70m-deduped model, but it can be trivially adapted to other models.
-
-Example command to run this code :
-
-python main.py --test_correctness -da -et 0.1 -sp /scratch/pyllm/dhimoila/output/test_correctness_jack/&
-
-python main.py -gc -da -ec -cbs 2 -et 0.1 -cml 10 -eml 10 -sp /scratch/pyllm/dhimoila/output/test_correctness/&
-
-python main.py -ec -eml 10 -sp /scratch/pyllm/dhimoila/output/120624_01/esal0/ -cp /scratch/pyllm/dhimoila/output/120624_01/circuit/merged/ -esal 0&
-"""
-
 ##########
 # Args
 ##########
@@ -25,68 +12,58 @@ import evaluation.faithfulness
 
 parser = ArgumentParser()
 
-parser.add_argument("--profile", action="store_true", help="Run the code with cProfile (withouth multiprocessing)")
-parser.add_argument("--get_circuit", "-gc", action="store_true", help="Run the first step - generate the circuit")
-parser.add_argument("--dump_all", "-da", action="store_true", help="Dump all example circuits on disk")
-parser.add_argument("--eval_circuit", "-ec", action="store_true", help="Run the second step - evaluate the circuit")
-parser.add_argument("--marks_version", "-mv", action="store_true", help="Use marks original code")
+parser.add_argument("--identity_dict", "-id", action="store_true", help="Use identity dictionaries")
+parser.add_argument("--SVD_dict", "-svd", action="store_true", help="Use SVD dictionaries")
+parser.add_argument("--White_dict", "-white", action="store_true", help="Use Whitening dictionaries")
+parser.add_argument("--SAE", action="store_true", help="Use SAE dictionaries")
 
-parser.add_argument("--identity_dict", "-id", action="store_true", help="Use identity dictionaries instead of SAEs")
-parser.add_argument("--SVD_dict", "-svd", action="store_true", help="Use SVD dictionaries instead of SAEs")
+parser.add_argument("--ROI", "-roi", action="store_true", help="Use Regions of Interest -attn heads and MLP layers- instead of neurons - canonical dimensions in dictionary space for the given dictionaries.")
+
+parser.add_argument("--activation", "-act", action="store_true", help="Compute activations")
+parser.add_argument("--attribution", "-attr", action="store_true", help="Compute attributions")
+parser.add_argument("--use_resid", "-resid", action="store_true", help="Use residual stream nodes instead of modules.")
+
+parser.add_argument("--n_batches", "-nb", type=int, default=1000, help="Number of batches to process.")
+parser.add_argument("--batch_size", "-bs", type=int, default=1, help="Number of examples to process in one go.")
+parser.add_argument("--steps", type=int, default=10, help="Number of steps to compute the attributions (precision of Integrated Gradients).")
 
 parser.add_argument("--node_threshold", "-nt", type=float, default=0.1)
 parser.add_argument("--edge_threshold", "-et", type=float, default=0.1)
 
+parser.add_argument("--aggregation", "-agg", type=str, default="sum", help="Method to aggregate graphs across examples. Available : sum, max")
+
 parser.add_argument("--ctx_len", "-cl", type=int, default=16, help="Maximum sequence lenght of example sequences")
 
-parser.add_argument("--circuit_method", "-cm", type=str, default="resid", help="Method to build the circuit. Available : resid, marks, resid_topk (use to your own risk)")
-parser.add_argument("--aggregation", "-agg", type=str, default="sum", help="Method to aggregate graphs across examples. Available : sum, max")
-parser.add_argument("--circuit_batch_size", "-cbs", type=int, default=1, help="Batch size for circuit building. You can increase this until you run out of memory.")
-parser.add_argument("--circuit_max_loop", "-cml", type=int, default=1000, help="Maximum number of example batches to process when building the graph.")
-
-parser.add_argument("--eval_method", "-em", type=str, default="edge_patching", help="Method to evaluate the circuit. Available : node_patching, edge_patching. Node patching is much faster but does not evaluate the same graph as the one built in the first step.")
-parser.add_argument("--eval_metric", "-emt", type=str, nargs='+', default=["logit", "KL", "acc", "MRR"], help="Metric to evaluate the circuit. Available : logit, KL")
-parser.add_argument("--eval_batch_size", "-ebs", type=int, default=100, help="Batch size for circuit evaluation.")
-parser.add_argument("--eval_max_loop", "-eml", type=int, default=100, help="Maximum number of example batches to process when evaluating the circuit.")
-parser.add_argument("--eval_start_at_layer", "-esal", type=int, default=1, help="At what layer to start evaluating the circuit. -1 means the whole circuit will be evaluated. Will run the original model up to the specified layer and then evaluate the circuit.")
-
 parser.add_argument("--save_path", "-sp", type=str, default='/scratch/pyllm/dhimoila/output/', help="Path to save the outputs.")
-parser.add_argument("--circuit_path", "-cp", type=str, default=None, help="Path to load the circuit from. Not necessary if running the first step.")
 
 args = parser.parse_args()
 
-available_cm = ["resid", "marks", "resid_topk"]
-available_em = ["node_patching", "edge_patching"]
-
-run_step_1 = args.get_circuit
-dump_all = args.dump_all
-run_step_2 = args.eval_circuit
-marks_version = args.marks_version
+if not sum([args.identity_dict, args.SVD_dict, args.White_dict, args.SAE]) == 1:
+    raise ValueError("Exactly one of --identity_dict, --SVD_dict, --White_dict, --SAE must be provided.")
 
 idd = args.identity_dict
 svd = args.SVD_dict
-cm = args.circuit_method
-cbs = args.circuit_batch_size
-em = args.eval_method
-ebs = args.eval_batch_size
-esal = args.eval_start_at_layer
+white = args.White_dict
+sae = args.SAE
+
+roi = args.ROI
+
+act = args.activation
+attr = args.attribution
+use_resid = args.use_resid
+
+n_batches = args.n_batches
+batch_size = args.batch_size
+steps = args.steps
+
+node_threshold = args.node_threshold
+edge_threshold = args.edge_threshold
+
+aggregation = args.aggregation
+
+ctx_len = args.ctx_len
+
 save_path = args.save_path
-circuit_path = args.circuit_path
-
-if marks_version:
-    cm = "marks"
-    em = "node_patching"
-
-if cm not in available_cm:
-    raise ValueError(f"--circuit_method must be in {available_cm}. Got {cm}")
-if em not in available_em:
-    raise ValueError(f"--eval_method must be in {available_em}. Got {em}")
-
-if (not run_step_1) and run_step_2 and circuit_path is None:
-    raise ValueError("--circuit_path must be provided if running only evaluation")
-
-if run_step_1 and circuit_path is None:
-    circuit_path = save_path + "circuit/"
 
 if __name__ == "__main__":
     print("Done.")

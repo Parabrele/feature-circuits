@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 import torch as t
 import torch.nn as nn
 
+from fancy_einsum import einsum
+
 class Dictionary(ABC):
     """
     A dictionary consists of a collection of vectors, an encoder, and a decoder.
@@ -50,32 +52,18 @@ class AutoEncoder(Dictionary, nn.Module):
     def decode(self, f):
         return self.decoder(f) + self.bias
     
-    def forward(self, x, output_features=False, ghost_mask=None):
+    def forward(self, x, output_features=False):
         """
         Forward pass of an autoencoder.
         x : activations to be autoencoded
         output_features : if True, return the encoded features as well as the decoded x
-        ghost_mask : if not None, run this autoencoder in "ghost mode" where features are masked
         """
-        if ghost_mask is None: # normal mode
-            f = self.encode(x)
-            x_hat = self.decode(f)
-            if output_features:
-                return x_hat, f
-            else:
-                return x_hat
-        
-        else: # ghost mode
-            f_pre = self.encoder(x - self.bias)
-            f_ghost = t.exp(f_pre) * ghost_mask.to(f_pre)
-            f = nn.ReLU()(f_pre)
-
-            x_ghost = self.decoder(f_ghost) # note that this only applies the decoder weight matrix, no bias
-            x_hat = self.decode(f)
-            if output_features:
-                return x_hat, x_ghost, f
-            else:
-                return x_hat, x_ghost
+        f = self.encode(x)
+        x_hat = self.decode(f)
+        if output_features:
+            return x_hat, f
+        else:
+            return x_hat
 
 class LinearDictionary(Dictionary, nn.Module):
     """
@@ -95,7 +83,7 @@ class LinearDictionary(Dictionary, nn.Module):
     def decode(self, f):
         return t.matmul(f, self.D.t()) + self.bias
     
-    def forward(self, x, output_features=False, ghost_mask=None):
+    def forward(self, x, output_features=False):
         f = self.encode(x)
         x_hat = self.decode(f)
         if output_features:
@@ -153,8 +141,35 @@ class IdentityDict(Dictionary, nn.Module):
     def decode(self, f):
         return f
     
-    def forward(self, x, output_features=False, ghost_mask=None):
+    def forward(self, x, output_features=False):
         if output_features:
             return x, x
         else:
             return x
+
+class LinearHeadDict(Dictionary, nn.Module):
+    """
+    A linear dictionary, i.e. two matrices E and D.
+    Made to simplify working with hook_z from transformer lens, where the output has shape (batch_size, seq_len, n_head, d_head)
+    """
+    def __init__(self, n_head, d_head, dict_size=None):
+        super().__init__()
+        self.activation_dim = d_head
+        self.dict_size = dict_size if dict_size is not None else self.activation_dim
+        self.bias = nn.Parameter(t.zeros((n_head, d_head)))
+        self.E = nn.Parameter(t.randn(n_head, self.dict_size, self.activation_dim))
+        self.D = nn.Parameter(t.permute(self.E, (0, 2, 1)))
+
+    def encode(self, x):
+        return einsum('b s h d, h d x -> b s h x', x - self.bias, self.E)
+    
+    def decode(self, f):
+        return einsum('b s h x, h x d -> b s h d', f, self.D) + self.bias
+    
+    def forward(self, x, output_features=False):
+        f = self.encode(x)
+        x_hat = self.decode(f)
+        if output_features:
+            return x_hat, f
+        else:
+            return x_hat

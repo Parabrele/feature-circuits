@@ -165,7 +165,7 @@ def faithfulness(
         if isinstance(metric, dict):
             results[threshold]['faithfulness'] = {}
             for name, value in metric.items():
-                if "rank" in name or "acc" in name:
+                if "MRR" in name or "acc" in name:
                     results[threshold]['faithfulness'][name] = threshold_result[name] / results['complete'][name]
                 elif name == "KL":
                     results[threshold]['faithfulness'][name] = threshold_result[name]

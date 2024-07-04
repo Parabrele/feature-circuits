@@ -38,4 +38,4 @@ def metric_fn_MRR(model, trg=None):
     if trg is None:
         raise ValueError("trg must be provided")
     logits = model.embed_out.output[torch.arange(trg[0].numel()), trg[0]]
-    return 1 / (1 + (logits.argsort(dim=-1, descending=True) == trg[1].unsqueeze(-1)).argmax(dim=-1).float())
+    return 1 / (1 + (logits.argsort(dim=-1, descending=True) == trg[1].unsqueeze(-1)).float().argmax(dim=-1).float())

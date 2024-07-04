@@ -138,6 +138,9 @@ def get_circuit_resid_only(
     
     # Now, backward through the model to get the effects of each layer on its successor.
     for layer in reversed(range(n_layers)):
+        print("Layer", layer, "threshold", edge_threshold)
+        print("Number of downstream features:", len(features_by_submod[resids[layer]]))
+        
         resid = resids[layer]
         if layer > 0:
             prev_resid = resids[layer-1]

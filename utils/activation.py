@@ -1,7 +1,7 @@
+from __future__ import annotations
+
 import torch as t
 from torchtyping import TensorType
-
-from __future__ import annotations
 
 class SparseAct():
     """
@@ -307,6 +307,7 @@ def get_hidden_states(
     dictionaries,
     is_tuple,
     input,
+    reconstruction_error=True
 ):
     hidden_states = {}
     with model.trace(input, **tracer_kwargs), t.no_grad():
@@ -315,7 +316,12 @@ def get_hidden_states(
             x = submodule.output
             if is_tuple[submodule]:
                 x = x[0]
-            x_hat, upstream_act = dictionary(x, output_features=True)
-            hidden_states[submodule] = SparseAct(act=upstream_act.save(), res=(x - x_hat).save())
+            
+            if reconstruction_error:
+                x_hat, f = dictionary(x, output_features=True)
+                hidden_states[submodule] = SparseAct(act=f.save(), res=(x - x_hat).save())
+            else:
+                f = dictionary.encode(x)
+                hidden_states[submodule] = SparseAct(act=f.save())
     hidden_states = {k : v.value for k, v in hidden_states.items()}
     return hidden_states

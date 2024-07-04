@@ -3,6 +3,27 @@ import torch
 import networkx as nx
 import networkit as nk
 
+from utils.activation import SparseAct
+from utils.sparse_coo_helper import sparse_coo_maximum
+
+def merge_circuits(
+    tot_circuit,
+    circuit      
+):
+    if tot_circuit is None:
+        tot_circuit = circuit
+    else:
+        for k, v in circuit[0].items():
+            if v is not None:
+                if type(v) == SparseAct:
+                    tot_circuit[0][k] = SparseAct.maximum(tot_circuit[0][k], v)
+                else:
+                    tot_circuit[0][k] = torch.maximum(tot_circuit[0][k], v)
+        for ku, vu in circuit[1].items():
+            for kd, vd in vu.items():
+                if vd is not None:
+                    tot_circuit[1][ku][kd] = sparse_coo_maximum(tot_circuit[1][ku][kd], vd)
+
 @torch.no_grad()
 def get_mask(graph, threshold):
     """
@@ -36,7 +57,6 @@ def get_mask(graph, threshold):
                     dtype=torch.bool
                 )
     return mask
-
 
 @torch.no_grad()
 def to_Digraph(circuit, discard_res=False, discard_y=False):

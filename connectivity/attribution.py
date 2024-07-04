@@ -1,5 +1,7 @@
 from collections import namedtuple
 import torch as t
+from fancy_einsum import einsum
+import einops
 from tqdm import tqdm
 from numpy import ndindex
 from typing import Dict, Union
@@ -252,6 +254,156 @@ def get_effect(
             (d_downstream_contracted, d_upstream_contracted)
         ), max_effect
 
+def head_attribution(
+    clean,
+    patch,
+    model,
+    attns,
+    other_submods,
+    dictionaries,
+    metric_fn,
+    steps=10,
+    metric_kwargs=dict(),
+    ablation_fn=lambda x : t.zeros_like(x) if isinstance(x, t.Tensor) else x.zeros_like(),
+):
+    submodules = attns + other_submods
+    
+    # first run through a test input to figure out which hidden states are tuples
+    is_tuple = {}
+    with model.trace("_"):
+        for submodule in submodules:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
+
+    def _get_hidden_states(hidden_states):
+        for submodule in submodules:
+            if submodule in attns:
+                submodule = submodule.hook_z
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+            f = dictionary.encode(x)
+            x_hat = dictionary.decode(f)
+            residual = x - x_hat
+            hidden_states[submodule] = SparseAct(act=f.save(), res=residual.save())
+
+    hidden_states_clean = {}
+    with model.trace(clean, **tracer_kwargs), t.no_grad():
+        _get_hidden_states(hidden_states_clean)
+    hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
+    print("hidden_states_clean", len(list(hidden_states_clean.keys())))
+    raise NotImplementedError("Check that the hidden states are correctly saved.")
+
+    if patch is None:
+        patch = clean
+
+    hidden_states_patch = {}
+    with model.trace(patch, **tracer_kwargs), t.no_grad():
+        _get_hidden_states(hidden_states_patch)
+    hidden_states_patch = {k : ablation_fn(v.value) for k, v in hidden_states_patch.items()}
+
+    effects = {}
+
+    # First, deal with the attention heads
+    for attn in attns:
+        hook_z = attn.hook_z
+        effects[hook_z] = []
+
+        dictionary = dictionaries[hook_z]
+        clean_state = hidden_states_clean[hook_z] # (batch_size, seq_len, n_head, d_head)
+        patch_state = hidden_states_patch[hook_z] # (batch_size, seq_len, n_head, d_head)
+        b, s, n_head, d_head = clean_state.act.shape
+        for h in range(n_head):
+            clean_kwargs = {}
+            patch_kwargs = {}
+            for attr in ['act', 'res']:
+                if getattr(clean_state, attr) is not None:
+                    clean_kwargs[attr] = getattr(clean_state, attr)[:, :, h, :] # (batch_size, seq_len, d_head)
+                    patch_kwargs[attr] = getattr(patch_state, attr)[:, :, h, :] # (batch_size, seq_len, d_head)
+            clean_state_h = SparseAct(**clean_kwargs)
+            patch_state_h = SparseAct(**patch_kwargs)
+
+            with model.trace(**tracer_kwargs) as tracer:
+                metrics = []
+                fs = []
+                for step in range(steps):
+                    alpha = step / steps
+                    f_h = (1 - alpha) * clean_state_h + alpha * patch_state_h
+                    f_h.act.retain_grad()
+                    f_h.res.retain_grad()
+                    fs.append(f_h)
+                    f = SparseAct(clean_state.act.clone(), clean_state.res.clone())
+                    f.act[:, :, h, :] = f_h.act
+                    f.res[:, :, h, :] = f_h.res
+                    # TODO : check that this gives the right grad on f_h
+                    with tracer.invoke(clean, scan=tracer_kwargs['scan']):
+                        z = dictionary.decode(f.act) + f.res
+                        attn_out = einsum(
+                            "batch pos head_index d_head, \
+                                head_index d_head d_model -> \
+                                batch pos head_index d_model",
+                            z,
+                            attn.W_O,
+                        )
+                        attn_out = (
+                            einops.reduce(attn_out, "batch position index model->batch position model", "sum")
+                            + attn.b_O
+                        )
+                        if is_tuple[attn]:
+                            attn.output[0][:] = attn_out
+                        else:
+                            attn.output = attn_out
+                        metrics.append(metric_fn(model, **metric_kwargs))
+                metric = sum([m for m in metrics])
+                metric.sum().backward(retain_graph=True) # TODO : why retain_graph ?
+                
+            raise NotImplementedError("Check validity of this gradients.")
+            mean_grad = sum([f.act.grad for f in fs]) / steps
+            mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+            grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+            delta = (patch_state_h - clean_state_h).detach() if patch_state is not None else -clean_state_h.detach()
+            effect = grad @ delta
+            effect = effect.act.sum(dim=-1) # sum over the d_head dimension
+
+            effects[hook_z].append(effect)
+        effects[hook_z] = t.stack(effects[hook_z], dim=-1) # from list of (batch_size, seq_len) to (batch_size, seq_len, n_head)
+        print(effects[hook_z].shape)
+        raise NotImplementedError("Check that the effects are correctly stacked.")
+    
+    # Now, the other submodules
+    for submodule in other_submods:
+        dictionary = dictionaries[submodule]
+        clean_state = hidden_states_clean[submodule] # (batch_size, seq_len, d_model)
+        patch_state = hidden_states_patch[submodule] # (batch_size, seq_len, d_model)
+        with model.trace(**tracer_kwargs) as tracer:
+            metrics = []
+            fs = []
+            for step in range(steps):
+                alpha = step / steps
+                f = (1 - alpha) * clean_state + alpha * patch_state
+                f.act.retain_grad()
+                f.res.retain_grad()
+                fs.append(f)
+                with tracer.invoke(clean, scan=tracer_kwargs['scan']):
+                    if is_tuple[submodule]:
+                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                    else:
+                        submodule.output = dictionary.decode(f.act) + f.res
+                    metrics.append(metric_fn(model, **metric_kwargs))
+            metric = sum([m for m in metrics])
+            metric.sum().backward(retain_graph=True)
+            
+        mean_grad = sum([f.act.grad for f in fs]) / steps
+        mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+        grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+        delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+        effect = grad @ delta
+        effect = effect.act.sum(dim=-1)
+
+        effects[submodule] = effect.unsqueeze(-1)
+
+    return effects
+
 ##########
 # Marks et al. functions. Here for compatibility.
 ##########
@@ -338,6 +490,7 @@ def _pe_ig(
         metric_fn,
         steps=10,
         metric_kwargs=dict(),
+        ablation_fn=lambda x : t.zeros_like(x) if isinstance(x, t.Tensor) else x.zeros_like(),
 ):
     
     # first run through a test input to figure out which hidden states are tuples
@@ -361,10 +514,7 @@ def _pe_ig(
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
 
     if patch is None:
-        hidden_states_patch = {
-            k : SparseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
-        }
-        total_effect = None
+        patch=clean
     else:
         hidden_states_patch = {}
         with model.trace(patch, **tracer_kwargs), t.no_grad():
@@ -379,7 +529,7 @@ def _pe_ig(
                 hidden_states_patch[submodule] = SparseAct(act=f.save(), res=residual.save())
             metric_patch = metric_fn(model, **metric_kwargs).save()
         total_effect = (metric_patch.value - metric_clean.value).detach()
-        hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
+        hidden_states_patch = {k : ablation_fn(v.value) for k, v in hidden_states_patch.items()}
 
     effects = {}
     deltas = {}
@@ -519,12 +669,13 @@ def patching_effect(
         metric_fn,
         method='attrib',
         steps=10,
-        metric_kwargs=dict()
+        metric_kwargs=dict(),
+        ablation_fn=None,
 ):
     if method == 'attrib':
         return _pe_attrib(clean, patch, model, submodules, dictionaries, metric_fn, metric_kwargs=metric_kwargs)
     elif method == 'ig':
-        return _pe_ig(clean, patch, model, submodules, dictionaries, metric_fn, steps=steps, metric_kwargs=metric_kwargs)
+        return _pe_ig(clean, patch, model, submodules, dictionaries, metric_fn, steps=steps, metric_kwargs=metric_kwargs, ablation_fn=ablation_fn)
     elif method == 'exact':
         return _pe_exact(clean, patch, model, submodules, dictionaries, metric_fn)
     else:

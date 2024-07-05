@@ -35,7 +35,7 @@ parser.add_argument("--SVD_dict", "-svd", action="store_true", help="Use SVD dic
 parser.add_argument("--node_threshold", "-nt", type=float, default=0.1)
 parser.add_argument("--edge_threshold", "-et", type=float, default=0.1)
 
-parser.add_argument("--dataset", type=str, default="wikipedia", help="Dataset to use. Available : wikipedia, gp (gender pronoun), gt (greater than), bool (evaluation of boolean expressions), ioi (indirect object identification).")
+parser.add_argument("--dataset", type=str, default="wikipedia", help="Dataset to use. Available : wikipedia, gp (gender pronoun), gt (greater than), bool (evaluation of boolean expressions), ioi (indirect object identification) or mixture (of ioi, gt and gp).")
 parser.add_argument("--ctx_len", "-cl", type=int, default=16, help="Maximum sequence lenght of example sequences")
 
 parser.add_argument("--circuit_method", "-cm", type=str, default="resid", help="Method to build the circuit. Available : resid, marks, resid_topk (use to your own risk)")
@@ -119,7 +119,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy import interpolate
 
-from data.buffer import wikipedia_buffer, gp_buffer, gt_buffer, ioi_buffer, bool_buffer
+from data.buffer import wikipedia_buffer, gp_buffer, gt_buffer, ioi_buffer, bool_buffer, mixture_buffer
 import evaluation
 from connectivity.effective import get_circuit
 from ablation.node_ablation import run_with_ablations
@@ -140,6 +140,8 @@ elif args.dataset == "ioi":
     buffer_fn = ioi_buffer
 elif args.dataset == "bool":
     buffer_fn = bool_buffer
+elif args.dataset == "mixture":
+    buffer_fn = mixture_buffer
 else:
     raise ValueError(f"Unknown dataset {args.dataset}")
 

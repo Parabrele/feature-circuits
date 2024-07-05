@@ -1,3 +1,15 @@
+"""
+Example commands to run the script:
+
+python -m experiments.functional_connectivity -id -roi -act -attr -nb 100 -bs 100 --dataset wikipedia --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/wikipedia/ -d 0 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset ioi --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/ioi/ -d 1 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset gp --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/gp/ -d 2 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset gt --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/gt/ -d 3 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset bool --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/bool/ -d 4 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset mixture --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/mixture/ -d 5 &
+
+"""
+
 ##########
 # Args
 ##########
@@ -10,6 +22,8 @@ from argparse import ArgumentParser
 
 parser = ArgumentParser()
 
+parser.add_argument("--device", "-d", type=int, default=0, help="Device to use. Default : 0.")
+
 parser.add_argument("--identity_dict", "-id", action="store_true", help="Use identity dictionaries")
 parser.add_argument("--SVD_dict", "-svd", action="store_true", help="Use SVD dictionaries")
 parser.add_argument("--White_dict", "-white", action="store_true", help="Use Whitening dictionaries")
@@ -21,7 +35,7 @@ parser.add_argument("--activation", "-act", action="store_true", help="Compute a
 parser.add_argument("--attribution", "-attr", action="store_true", help="Compute attributions")
 parser.add_argument("--use_resid", "-resid", action="store_true", help="Use residual stream nodes instead of modules.")
 
-parser.add_argument("--dataset", type=str, default="wikipedia", help="Dataset to use. Available : wikipedia, gp, gt, bool, ioi.")
+parser.add_argument("--dataset", type=str, default="wikipedia", help="Dataset to use. Available : wikipedia, gp, gt, bool, ioi or mixture.")
 parser.add_argument("--n_batches", "-nb", type=int, default=1000, help="Number of batches to process.")
 parser.add_argument("--batch_size", "-bs", type=int, default=1, help="Number of examples to process in one go.")
 parser.add_argument("--steps", type=int, default=10, help="Number of steps to compute the attributions (precision of Integrated Gradients).")
@@ -39,6 +53,8 @@ args = parser.parse_args()
 
 if not sum([args.identity_dict, args.SVD_dict, args.White_dict, args.SAE]) == 1:
     raise ValueError("Exactly one of --identity_dict, --SVD_dict, --White_dict, --SAE must be provided.")
+
+device_id = args.device
 
 idd = args.identity_dict
 svd = args.SVD_dict
@@ -83,7 +99,7 @@ import torch
 from transformers import logging
 logging.set_verbosity_error()
 
-from data.buffer import wikipedia_buffer, gp_buffer, gt_buffer, bool_buffer, ioi_buffer
+from data.buffer import wikipedia_buffer, gp_buffer, gt_buffer, bool_buffer, ioi_buffer, mixture_buffer
 from utils.experiments_setup import load_model_and_modules, load_saes
 
 if args.dataset == "wikipedia":
@@ -94,6 +110,12 @@ elif args.dataset == "gt":
     buffer_fn = gt_buffer
 elif args.dataset == "bool":
     buffer_fn = bool_buffer
+elif args.dataset == "ioi":
+    buffer_fn = ioi_buffer
+elif args.dataset == "mixture":
+    buffer_fn = mixture_buffer
+else:
+    raise ValueError(f"Unknown dataset : {args.dataset}")
 
 if __name__ == "__main__":
     print("Done.")
@@ -130,7 +152,7 @@ if __name__ == "__main__":
     with open(save_path + "args.json", "w") as f:
         json.dump(JSON_args, f)
     
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEVICE = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
     
     pythia70m, pythia70m_embed, pythia70m_resids, pythia70m_attns, pythia70m_mlps, submod_names = load_model_and_modules(DEVICE)
 

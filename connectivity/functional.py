@@ -1,3 +1,10 @@
+import os
+
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+multiprocessing.set_start_method('spawn', force=True)
+
 import torch
 from welford_torch import OnlineCovariance
 

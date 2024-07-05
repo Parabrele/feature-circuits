@@ -8,21 +8,39 @@ from utils.sparse_coo_helper import sparse_coo_maximum
 
 def merge_circuits(
     tot_circuit,
-    circuit      
+    circuit,
+    aggregation="max",
 ):
     if tot_circuit is None:
         tot_circuit = circuit
     else:
         for k, v in circuit[0].items():
             if v is not None:
-                if type(v) == SparseAct:
-                    tot_circuit[0][k] = SparseAct.maximum(tot_circuit[0][k], v)
+                if aggregation == "sum":
+                    tot_circuit[0][k] += v
+                elif aggregation == "max":
+                    if type(v) == SparseAct:
+                        tot_circuit[0][k] = SparseAct.maximum(tot_circuit[0][k], v)
+                    else:
+                        tot_circuit[0][k] = torch.maximum(tot_circuit[0][k], v)
                 else:
-                    tot_circuit[0][k] = torch.maximum(tot_circuit[0][k], v)
+                    raise ValueError(f"Unknown aggregation method {aggregation}")
         for ku, vu in circuit[1].items():
             for kd, vd in vu.items():
                 if vd is not None:
-                    tot_circuit[1][ku][kd] = sparse_coo_maximum(tot_circuit[1][ku][kd], vd)
+                    if aggregation == "sum":
+                        tot_circuit[1][ku][kd] += vd
+                    elif aggregation == "max":
+                        tot_circuit[1][ku][kd] = sparse_coo_maximum(tot_circuit[1][ku][kd], vd)
+
+def mean_circuit(circuit, n):
+    for k, v in circuit[0].items():
+        if v is not None:
+            circuit[0][k] /= n
+    for ku, vu in circuit[1].items():
+        for kd, vd in vu.items():
+            if vd is not None:
+                circuit[1][ku][kd] /= n
 
 @torch.no_grad()
 def get_mask(graph, threshold):

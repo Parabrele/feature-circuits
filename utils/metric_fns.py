@@ -6,7 +6,15 @@ def metric_fn_logit(model, trg=None):
     """
     if trg is None:
         raise ValueError("trg must be provided")
-    return model.embed_out.output[torch.arange(trg[0].numel()), trg[0], trg[1]]
+    if len(trg) == 2:
+        return model.embed_out.output[torch.arange(trg[0].numel()), trg[0], trg[1]]
+    elif len(trg) == 3:
+        if trg[2] is not None:
+            return model.embed_out.output[torch.arange(trg[0].numel()), trg[0], trg[1]] - model.embed_out.output[torch.arange(trg[0].numel()), trg[0], trg[2]]
+        else:
+            return model.embed_out.output[torch.arange(trg[0].numel()), trg[0], trg[1]]
+    else:
+        raise ValueError("This should not happen")
 
 def metric_fn_KL(model, trg=None, clean_logits=None):
     """

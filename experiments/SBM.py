@@ -86,7 +86,7 @@ from welford_torch import OnlineCovariance
 
 from dictionary_learning import AutoEncoder
 from dictionary_learning.dictionary import IdentityDict, LinearDictionary
-from data.buffer import TokenBuffer
+from data.buffer import TokenBatches
 
 from circuit import get_activation
 

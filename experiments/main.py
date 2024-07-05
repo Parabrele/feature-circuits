@@ -21,8 +21,6 @@ if __name__ == "__main__":
 
 from argparse import ArgumentParser
 
-import evaluation.faithfulness
-
 parser = ArgumentParser()
 
 parser.add_argument("--profile", action="store_true", help="Run the code with cProfile (withouth multiprocessing)")
@@ -37,6 +35,7 @@ parser.add_argument("--SVD_dict", "-svd", action="store_true", help="Use SVD dic
 parser.add_argument("--node_threshold", "-nt", type=float, default=0.1)
 parser.add_argument("--edge_threshold", "-et", type=float, default=0.1)
 
+parser.add_argument("--dataset", type=str, default="wikipedia", help="Dataset to use. Available : wikipedia, gp (gender pronoun), gt (greater than), bool (evaluation of boolean expressions), ioi (indirect object identification).")
 parser.add_argument("--ctx_len", "-cl", type=int, default=16, help="Maximum sequence lenght of example sequences")
 
 parser.add_argument("--circuit_method", "-cm", type=str, default="resid", help="Method to build the circuit. Available : resid, marks, resid_topk (use to your own risk)")
@@ -110,8 +109,6 @@ from concurrent.futures import ProcessPoolExecutor
 multiprocessing.set_start_method('spawn', force=True)
 
 import torch
-from nnsight import LanguageModel
-from datasets import load_dataset
 
 from transformers import logging
 logging.set_verbosity_error()
@@ -122,17 +119,29 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy import interpolate
 
-from data.wikipedia import get_buffer
+from data.buffer import wikipedia_buffer, gp_buffer, gt_buffer, ioi_buffer, bool_buffer
 import evaluation
 from connectivity.effective import get_circuit
 from ablation.node_ablation import run_with_ablations
 
-from utils.dictionary import AutoEncoder, IdentityDict
 from utils.activation import SparseAct
 from utils.savior import save_circuit, load_latest
-from utils.graph_utils import merge_circuits
+from utils.graph_utils import merge_circuits, mean_circuit
 from utils.metric_fns import metric_fn_KL, metric_fn_logit, metric_fn_acc, metric_fn_MRR
 from utils.experiments_setup import load_model_and_modules, load_saes
+
+if args.dataset == "wikipedia":
+    buffer_fn = wikipedia_buffer
+elif args.dataset == "gp":
+    buffer_fn = gp_buffer
+elif args.dataset == "gt":
+    buffer_fn = gt_buffer
+elif args.dataset == "ioi":
+    buffer_fn = ioi_buffer
+elif args.dataset == "bool":
+    buffer_fn = bool_buffer
+else:
+    raise ValueError(f"Unknown dataset {args.dataset}")
 
 if __name__ == "__main__":
     print("Done.")
@@ -441,7 +450,7 @@ def run_main(device_id, step_1, step_2):
             device=DEVICE,
         )
 
-        buffer = get_buffer(pythia70m, cbs, DEVICE, args.ctx_len)
+        buffer = buffer_fn(pythia70m, cbs, DEVICE, args.ctx_len)
         
         tot_circuit = None
         
@@ -450,13 +459,24 @@ def run_main(device_id, step_1, step_2):
         edge_threshold = args.edge_threshold
         node_threshold = args.node_threshold
 
-        for tokens, trg_idx, trg in tqdm(buffer):
+        for batch in tqdm(buffer):
             if i >= max_loop:
                 break
             i += 1
+            
+            tokens = batch["clean"]
+            trg_idx = batch["trg_idx"]
+            trg = batch["trg"]
+            corr = None
+            if "corr" in batch:
+                corr = batch["corr"]
+            corr_trg = None
+            if "corr_trg" in batch:
+                corr_trg = batch["corr_trg"]
+                
             circuit = get_circuit(
                 tokens,
-                None,
+                corr,
                 model=pythia70m,
                 embed=pythia70m_embed,
                 attns=pythia70m_attns,
@@ -464,7 +484,7 @@ def run_main(device_id, step_1, step_2):
                 resids=pythia70m_resids,
                 dictionaries=dictionaries,
                 metric_fn=metric_fn_logit,
-                metric_kwargs={"trg": (trg_idx, trg)},
+                metric_kwargs={"trg": (trg_idx, trg, corr_trg)},
                 node_threshold=node_threshold,
                 edge_threshold=edge_threshold,
                 method=cm,
@@ -472,13 +492,16 @@ def run_main(device_id, step_1, step_2):
                 dump_all=dump_all,
                 save_path=save_path,
             )
-            merge_circuits(tot_circuit, circuit)
+            merge_circuits(tot_circuit, circuit, aggregation=args.aggregation)
             
             if i % 10 == 0:
+                to_save = tot_circuit
+                if args.aggregation == "sum":
+                    to_save = mean_circuit(tot_circuit, i)
                 save_circuit(
                     save_path + "circuit/" + f"{DEVICE.type}_{DEVICE.index}/",
-                    tot_circuit[0],
-                    tot_circuit[1],
+                    to_save[0],
+                    to_save[1],
                     i * cbs,
                     dataset_name="",
                     model_name="",
@@ -529,7 +552,7 @@ def run_main(device_id, step_1, step_2):
         max_loop = args.eval_max_loop
         dict_size = 32768
 
-        buffer = get_buffer(pythia70m)
+        buffer = buffer_fn(pythia70m)
         
         aggregated_outs = {
             'features' : {
@@ -545,12 +568,15 @@ def run_main(device_id, step_1, step_2):
                 'fempty' : 0,
             }
         }
-        for tokens, trg_idx, trg in tqdm(buffer):
+        for batch in tqdm(buffer):
             if i >= max_loop:
                 break
             i += 1
             #thresholds = [0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512]
             thresholds = torch.logspace(-6, 2, 20, 10).tolist()
+            tokens = batch["clean"]
+            trg_idx = batch["trg_idx"]
+            trg = batch["trg"]
             outs = {
                 'features' :
                     marks_get_fcs(
@@ -647,13 +673,24 @@ def run_main(device_id, step_1, step_2):
         i = 0
         max_loop = args.eval_max_loop
 
-        buffer = get_buffer(pythia70m, ebs, DEVICE, args.ctx_len)
+        buffer = buffer_fn(pythia70m, ebs, DEVICE, args.ctx_len)
         
         aggregated_outs = None
-        for tokens, trg_idx, trg in tqdm(buffer):
+        for batch in tqdm(buffer):
             if i >= max_loop:
                 break
             i += 1
+
+            tokens = batch["clean"]
+            trg_idx = batch["trg_idx"]
+            trg = batch["trg"]
+            corr = None
+            if "corr" in batch:
+                corr = batch["corr"]
+            corr_trg = None
+            if "corr_trg" in batch:
+                corr_trg = batch["corr_trg"]
+
             thresholds = torch.logspace(-2, 2, 15, 10).tolist()
             faithfulness = evaluation.faithfulness.faithfulness(
                 pythia70m,
@@ -664,8 +701,8 @@ def run_main(device_id, step_1, step_2):
                 circuit=circuit,
                 thresholds=thresholds,
                 metric_fn=metric_fn_dict,
-                metric_fn_kwargs={"trg": (trg_idx, trg)},
-                patch=None,
+                metric_fn_kwargs={"trg": (trg_idx, trg, corr_trg)},
+                patch=corr,
                 default_ablation='mean',
                 get_graph_info=(i <= 1),
             )
@@ -713,6 +750,38 @@ def run_main(device_id, step_1, step_2):
             print("\nDone running step 2.\n")
 
 if __name__ == "__main__":
+    JSON_args = {
+        "profile": args.profile,
+        "get_circuit": args.get_circuit,
+        "dump_all": args.dump_all,
+        "eval_circuit": args.eval_circuit,
+        "marks_version": args.marks_version,
+        "identity_dict": args.identity_dict,
+        "SVD_dict": args.SVD_dict,
+        "node_threshold": args.node_threshold,
+        "edge_threshold": args.edge_threshold,
+        "ctx_len": args.ctx_len,
+        "circuit_method": args.circuit_method,
+        "aggregation": args.aggregation,
+        "circuit_batch_size": args.circuit_batch_size,
+        "circuit_max_loop": args.circuit_max_loop,
+        "eval_method": args.eval_method,
+        "eval_metric": args.eval_metric,
+        "eval_batch_size": args.eval_batch_size,
+        "eval_max_loop": args.eval_max,
+        "eval_start_at_layer": args.eval_start_at_layer,
+        "save_path": args.save_path,
+        "circuit_path": args.circuit_path,
+    }
+
+    print("Saving at : ", save_path)
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+    import json
+    with open(save_path + "args.json", "w") as f:
+        json.dump(JSON_args, f)
+    
     import time
     available_gpus = torch.cuda.device_count()
 

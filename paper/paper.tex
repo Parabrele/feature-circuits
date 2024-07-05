@@ -132,6 +132,8 @@ We explore ways to abstract transformer models as interpretable computational gr
 %
 % (future) do it across model sizes and across training steps, to see the emergence of these structures, and if there are similarities between model sizes.
 
+% In background section, largely inspire from https://arxiv.org/pdf/1705.10225 : we want to avoid the pitfall of overfitting statistical fluctuations in the data by finding blocks that do not account for statistically significant structure in the data that can't be explained by random fluctuations.). We also want to avoid underfitting : nested SBM. In the same way we chose P(b) to be an uninformative prior by accounting for uniform distributions of B and block sizes, we also want to account for biases in lambda : quadratic penalty on B as e is a B x B matrix : we can view it as an SBM ! This way we have a better prior distribution for e. To be able to efficiently find b that maximises P(b|A), we can use a markov chain monte carlo with arbitrary b_0 and with equilibrium distribution being optimal.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % (for internship report : ) SAEs are just one direction in trying to find better geometric representations of models. Most obvious : SVD/whitened space, more complex : LIB space, feature space, for any dictionary one can think of. Finding specific directions / features as well as studying interventions are very related fields when studying the geometry of latent space. 

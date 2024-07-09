@@ -123,6 +123,13 @@ def get_effect(
     except KeyError:
         raise ValueError(f"Module {downstream_submod} has no features to compute effects for")
 
+    if hasattr(model, 'device'):
+        device = model.device
+    elif hasattr(model, 'cfg'):
+        device = model.cfg.device
+    else:
+        raise ValueError("Can't get model device :c")
+
     #print(f"Computing effects for layer {layer} with {len(downstream_features)} features")
 
     if not features_by_submod[downstream_submod]: # handle empty list
@@ -241,7 +248,7 @@ def get_effect(
         effect_indices = t.tensor(
             [[downstream_feat for downstream_feat in downstream_features for _ in effect_indices[downstream_feat]],
             t.cat([effect_indices[downstream_feat] for downstream_feat in downstream_features], dim=0)]
-        ).to(model.device)
+        ).to(device)
         effect_values = t.cat([effect_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
 
         
@@ -272,9 +279,12 @@ def head_attribution(
     is_tuple = {}
     with model.trace("_"):
         for submodule in submodules:
+            if submodule in attns:
+                is_tuple[submodule.hook_z] = type(submodule.hook_z.output.shape) == tuple
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
     def _get_hidden_states(hidden_states):
+        i = 0
         for submodule in submodules:
             if submodule in attns:
                 submodule = submodule.hook_z
@@ -291,8 +301,6 @@ def head_attribution(
     with model.trace(clean, **tracer_kwargs), t.no_grad():
         _get_hidden_states(hidden_states_clean)
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
-    print("hidden_states_clean", len(list(hidden_states_clean.keys())))
-    raise NotImplementedError("Check that the hidden states are correctly saved.")
 
     if patch is None:
         patch = clean
@@ -356,8 +364,7 @@ def head_attribution(
                         metrics.append(metric_fn(model, **metric_kwargs))
                 metric = sum([m for m in metrics])
                 metric.sum().backward(retain_graph=True) # TODO : why retain_graph ?
-                
-            raise NotImplementedError("Check validity of this gradients.")
+            
             mean_grad = sum([f.act.grad for f in fs]) / steps
             mean_residual_grad = sum([f.res.grad for f in fs]) / steps
             grad = SparseAct(act=mean_grad, res=mean_residual_grad)
@@ -367,8 +374,6 @@ def head_attribution(
 
             effects[hook_z].append(effect)
         effects[hook_z] = t.stack(effects[hook_z], dim=-1) # from list of (batch_size, seq_len) to (batch_size, seq_len, n_head)
-        print(effects[hook_z].shape)
-        raise NotImplementedError("Check that the effects are correctly stacked.")
     
     # Now, the other submodules
     for submodule in other_submods:
@@ -624,7 +629,7 @@ def _pe_exact(
         dictionary = dictionaries[submodule]
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
-        effect = SparseAct(act=t.zeros_like(clean_state.act), resc=t.zeros(*clean_state.res.shape[:-1])).to(model.device)
+        effect = SparseAct(act=t.zeros_like(clean_state.act), resc=t.zeros(*clean_state.res.shape[:-1]))
         
         # iterate over positions and features for which clean and patch differ
         idxs = t.nonzero(patch_state.act - clean_state.act)
@@ -695,12 +700,18 @@ def jvp(
     """
     Return a sparse shape [# downstream features + 1, # upstream features + 1] tensor of Jacobian-vector products.
     """
+    if hasattr(model, 'device'):
+        device = model.device
+    elif hasattr(model, 'cfg'):
+        device = model.cfg.device
+    else:
+        raise ValueError("Can't get model device :c")
 
     if not downstream_features: # handle empty list
         if not return_without_right:
-            return t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(model.device)
+            return t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(device)
         else:
-            return t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(model.device), t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(model.device)
+            return t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(device), t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(device)
 
     # first run through a test input to figure out which hidden states are tuples
     is_tuple = {}
@@ -765,7 +776,7 @@ def jvp(
     vjv_indices = t.tensor(
         [[downstream_feat for downstream_feat in downstream_features for _ in vjv_indices[downstream_feat].value],
          t.cat([vjv_indices[downstream_feat].value for downstream_feat in downstream_features], dim=0)]
-    ).to(model.device)
+    ).to(device)
     vjv_values = t.cat([vjv_values[downstream_feat].value for downstream_feat in downstream_features], dim=0)
 
     if not return_without_right:
@@ -774,7 +785,7 @@ def jvp(
     jv_indices = t.tensor(
         [[downstream_feat for downstream_feat in downstream_features for _ in jv_indices[downstream_feat].value],
          t.cat([jv_indices[downstream_feat].value for downstream_feat in downstream_features], dim=0)]
-    ).to(model.device)
+    ).to(device)
     jv_values = t.cat([jv_values[downstream_feat].value for downstream_feat in downstream_features], dim=0)
 
     return (

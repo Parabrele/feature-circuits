@@ -15,3 +15,5 @@ zstandard>=0.22.0
 mwparserfromhell
 networkit
 scipy
+fancy-einsum
+transformer-lens

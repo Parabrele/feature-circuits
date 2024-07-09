@@ -35,9 +35,10 @@ print("Done.")
 # define a toy input
 
 clean = "When Mary and John went to the store, John gave a drink to"
+tokens = pythia70m.tokenizer(clean, return_tensors="pt")
 trg_idx = torch.tensor([-1]).to(device)
 trg_str = " Mary"
-trg = torch.tensor([pythia70m.tokenizer.encode(trg_str)[0]], device=device)
+trg = tokens["input_ids"].to(device)[0][1]
 
 print("clean:", clean)
 print("trg_str:", trg_str)
@@ -58,7 +59,7 @@ circuit = get_circuit(
     dictionaries=dictionaries,
     metric_fn=metric_fn_logit,
     metric_kwargs={"trg": (trg_idx, trg)},
-    edge_threshold=0.01,
+    edge_threshold=0.1,
 )
 print("Done.")
 
@@ -69,7 +70,13 @@ print("Done.")
 start_at_layer = 1
 
 submodules = [pythia70m_embed] if start_at_layer == -1 else []
-for i in range(max(start_at_layer, 0), len(pythia70m.gpt_neox.layers)):
+
+if hasattr(pythia70m, "gpt_neox"):
+    n_layers = len(pythia70m.gpt_neox.layers)
+elif hasattr(pythia70m, "cfg"):
+    n_layers = pythia70m.cfg.n_layers
+
+for i in range(max(start_at_layer, 0), n_layers):
     submodules.append(pythia70m_resids[i])
 
 from evaluation.faithfulness import faithfulness

@@ -42,6 +42,8 @@ answer_token_indices = torch.tensor(
 )
 
 def get_logit_diff(logits, answer_token_indices=answer_token_indices):
+    if isinstance(logits, LanguageModel):
+        logits = logits.unembed.output
     if len(logits.shape) == 3:
         logits = logits[:, -1, :]
     correct_logits = logits.gather(1, answer_token_indices[:, 0].unsqueeze(1))
@@ -126,7 +128,7 @@ fig.update_layout(
     yaxis_title="Layer"
 )
 
-fig.show()
+#fig.show()
 
 ######
 # Now mine

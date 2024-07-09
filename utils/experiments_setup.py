@@ -72,7 +72,8 @@ def load_saes(
     svd=False,
     white=False,
     device='cpu',
-    path='/scratch/pyllm/dhimoila/'
+    path='/scratch/pyllm/dhimoila/',
+    unified=True
 ):
     if white:
         raise NotImplementedError("Whitening is not implemented yet.")
@@ -83,7 +84,7 @@ def load_saes(
 
     if idd:
         dictionaries[model_embed] = IdentityDict(d_model)
-        for layer in range(len(model.gpt_neox.layers)):
+        for layer in range(len(model.gpt_neox.layers if not unified else model.blocks)):
             dictionaries[model_resids[layer]] = IdentityDict(d_model)
             dictionaries[model_attns[layer]] = IdentityDict(d_model)
             dictionaries[model_mlps[layer]] = IdentityDict(d_model)
@@ -106,7 +107,7 @@ def load_saes(
         dictionaries[model_embed].D = V
         dictionaries[model_embed].bias = mean
 
-    for layer in range(len(model.gpt_neox.layers)):
+    for layer in range(len(model.gpt_neox.layers if not unified else model.blocks)):
         
         if not svd:
             ae = AutoEncoder(d_model, dict_size).to(device)

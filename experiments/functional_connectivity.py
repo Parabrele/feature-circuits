@@ -1,12 +1,12 @@
 """
 Example commands to run the script:
 
-python -m experiments.functional_connectivity -id -roi -act -attr -nb 100 -bs 100 --dataset wikipedia --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/wikipedia/ -d 0 &
-python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset ioi --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/ioi/ -d 1 &
-python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset gp --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/gp/ -d 2 &
-python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset gt --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/gt/ -d 3 &
-python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset bool --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/bool/ -d 4 &
-python -m experiments.functional_connectivity -id -roi -act -attr -bs 100 --dataset mixture --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/mixture/ -d 5 &
+python -m experiments.functional_connectivity -id -roi -act -attr -nb 45 -bs 10 --dataset wikipedia --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/wikipedia/ -d 0 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 10 --dataset ioi --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/ioi/ -d 1 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 10 --dataset gp --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/gp/ -d 2 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 10 --dataset gt --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/gt/ -d 3 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 10 --dataset bool --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/bool/ -d 4 &
+python -m experiments.functional_connectivity -id -roi -act -attr -bs 10 --dataset mixture --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/mixture/ -d 5 &
 
 """
 
@@ -23,6 +23,8 @@ from argparse import ArgumentParser
 parser = ArgumentParser()
 
 parser.add_argument("--device", "-d", type=int, default=0, help="Device to use. Default : 0.")
+
+parser.add_argument("--model_name", type=str, default="gpt2", help="Model to use. Default : gpt2.")
 
 parser.add_argument("--identity_dict", "-id", action="store_true", help="Use identity dictionaries")
 parser.add_argument("--SVD_dict", "-svd", action="store_true", help="Use SVD dictionaries")
@@ -56,6 +58,8 @@ if not sum([args.identity_dict, args.SVD_dict, args.White_dict, args.SAE]) == 1:
 
 device_id = args.device
 
+model_name = args.model_name
+
 idd = args.identity_dict
 svd = args.SVD_dict
 white = args.White_dict
@@ -87,7 +91,6 @@ if __name__ == "__main__":
 # Imports
 ##########
 
-from connectivity.functional import generate_cov
 
 if __name__ == "__main__":
     print("Importing...")
@@ -98,6 +101,8 @@ import torch
 
 from transformers import logging
 logging.set_verbosity_error()
+
+from connectivity.functional import generate_cov
 
 from data.buffer import wikipedia_buffer, gp_buffer, gt_buffer, bool_buffer, ioi_buffer, mixture_buffer
 from utils.experiments_setup import load_model_and_modules, load_saes
@@ -154,35 +159,34 @@ if __name__ == "__main__":
     
     DEVICE = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
     
-    pythia70m, pythia70m_embed, pythia70m_resids, pythia70m_attns, pythia70m_mlps, submod_names = load_model_and_modules(DEVICE)
+    model, embed, resids, attns, mlps, submod_names = load_model_and_modules(DEVICE, model_name=model_name)
 
     dictionaries = load_saes(
-        pythia70m,
-        pythia70m_embed,
-        pythia70m_resids,
-        pythia70m_attns,
-        pythia70m_mlps,
+        model,
+        embed,
+        resids,
+        attns,
+        mlps,
         idd=idd,
         svd=svd,
         white=white,
         device=DEVICE,
     )
 
-    buffer = buffer_fn(pythia70m, batch_size, DEVICE, args.ctx_len)
+    buffer = buffer_fn(model, batch_size, DEVICE, args.ctx_len)
         
     cov = generate_cov(
         data_buffer=buffer,
-        model=pythia70m,
-        embed=pythia70m_embed,
-        resids=pythia70m_resids,
-        attns=pythia70m_attns,
-        mlps=pythia70m_mlps,
+        model=model,
+        embed=embed,
+        resids=resids,
+        attns=attns,
+        mlps=mlps,
         dictionaries=dictionaries,
         get_act=act,
         get_attr=attr,
         neuron=(not roi),
         ROI=roi,
-        batch_size=batch_size,
         use_resid=use_resid,
         n_batches=n_batches,
         aggregation=aggregation,
@@ -190,14 +194,11 @@ if __name__ == "__main__":
         discard_reconstruction_error=(not sae),
     )
     
-    name = "identity" if idd else "SVD" if svd else "White" if white else "SAE" if sae else "Unknown"
-    name += "_ROI" if roi else "_Neurons"
-    name += "_cov.pt"
     if act:
         print("Saving activations...", end="")
-        torch.save(cov['act'], save_path + "act_" + name)
+        torch.save(cov['act'], save_path + "act_cov.pt")
         print("Done.")
     if act:
         print("Saving attributions...", end="")
-        torch.save(cov['attr'], save_path + "attr_" + name)
+        torch.save(cov['attr'], save_path + "attr_cov.pt")
         print("Done.")

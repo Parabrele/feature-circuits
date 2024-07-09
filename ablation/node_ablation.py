@@ -1,3 +1,7 @@
+"""
+This is unmodified code from marks et al, for compatibility.
+"""
+
 import torch as t
 from argparse import ArgumentParser
 from nnsight import LanguageModel

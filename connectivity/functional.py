@@ -8,7 +8,7 @@ multiprocessing.set_start_method('spawn', force=True)
 import torch
 from welford_torch import OnlineCovariance
 
-import tqdm
+from tqdm import tqdm
 
 from connectivity.attribution import patching_effect, head_attribution
 
@@ -79,6 +79,9 @@ def ROI_activation(
 
     if dictionaries is None:
         dictionaries = {submod: IdentityDict() for submod in all_submods}
+    else:
+        for attn in attns:
+            dictionaries[attn.hook_z] = dictionaries[attn]
 
     
     is_tuple = {}
@@ -101,8 +104,6 @@ def ROI_activation(
             if k in z_hooks:
                 b, s, h, d = v.act.shape
                 hidden_states[k] = v.act.norm(dim=-1) # (b, s, h)
-                print(hidden_states[k].shape)
-                raise NotImplementedError("Check the shape here.")
             else:
                 b, s, d = v.act.shape
                 hidden_states[k] = v.act.norm(dim=-1).view(b, s, 1) # (b, s, 1)
@@ -242,7 +243,6 @@ def generate_cov(
     get_attr=True,
     neuron=True,
     ROI=False,
-    batch_size=100,
     use_resid=False,
     n_batches=1000,
     aggregation='sum',
@@ -289,9 +289,23 @@ def generate_cov(
     # there is an annoying bug with multiprocessing and nnsight. Don't use multiprocessing for now.
     DEBUG = True
     if DEBUG:
-        for tokens, trg_idx, trg in tqdm(data_buffer, total=n_batches):
+        for batch in tqdm(data_buffer, total=n_batches):
+             
+            tokens = batch["clean"]
+            trg_idx = batch["trg_idx"]
+            trg = batch["trg"]
+            corr = None
+            if "corr" in batch:
+                corr = batch["corr"]
+                act_kwargs['ablation_fn'] = lambda x : x
+            corr_trg = None
+            if "corr_trg" in batch:
+                corr_trg = batch["corr_trg"].to(device)
+            
             act_kwargs['clean'] = tokens.to(device)
-            act_kwargs['metric_fn_kwargs']['trg'] = (trg_idx.to(device), trg.to(device))
+            act_kwargs['patch'] = corr
+            act_kwargs['metric_fn_kwargs']['trg'] = (trg_idx.to(device), trg.to(device), corr_trg)
+            
             if neuron:
                 act = neuron_activation(**act_kwargs)
             elif ROI:

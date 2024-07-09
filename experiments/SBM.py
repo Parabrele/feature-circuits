@@ -1,7 +1,5 @@
 """
-python SBM.py --generate_cov -id -act -attr -nb 1000 -bs 100 -path /scratch/pyllm/dhimoila/output/SBM/id/ &
-
-python SBM.py --fit_cov -id -act -attr -path /scratch/pyllm/dhimoila/output/SBM/id/ &
+python -m experiments.SBM -fc --load_path /scratch/pyllm/dhimoila/output/functional/ROI/id/ioi/attr_cov.pt --save_path /scratch/pyllm/dhimoila/output/functional/ROI/id/ioi/
 """
 
 ##########
@@ -14,81 +12,35 @@ from argparse import ArgumentParser
 
 parser = ArgumentParser()
 
-parser.add_argument("--generate_cov", "-gc", action="store_true", help="Generate the covariance matrices of activations")
-parser.add_argument("--fit_cov", "-fc", action="store_true", help="Fit a SBM to the covariance matrices of activations")
+parser.add_argument("--fit_cov", "-fc", action="store_true", help="Fit a SBM to the covariance matrices of activations stored at `load_path`.")
+parser.add_argument("--sparsity_threshold", type=float, default=-1, help="If -1, do not threshold according to some sparsity requirement. Otherwise, expected to be between 0 and 1, and gives the target density.")
+parser.add_argument("--correlation_threshold", type=float, default=-1, help="If -1, do not threshold according to some sparsity requirement. Otherwise, expected to be between 0 and 1, and gives the target density.")
 
-parser.add_argument("--identity_dict", "-id", action="store_true", help="Use identity dictionaries instead of SAEs")
-parser.add_argument("--SVD_dict", "-svd", action="store_true", help="Use SVD dictionaries instead of SAEs")
-parser.add_argument("--White_dict", "-white", action="store_true", help="Use whitening space as dictionaries instead of SAEs")
+parser.add_argument("--fit_graph", "-fg", action="store_true", help="Fit a SBM to a graph given either as a networkx, networkit or graph_tool graph, or a dict of dict of sparse connections, stored at `load_path`.")
 
-parser.add_argument("--activation", "-act", action="store_true", help="Compute activations")
-parser.add_argument("--attribution", "-attr", action="store_true", help="Compute attributions")
-parser.add_argument("--use_resid", "-resid", action="store_true", help="Use residual stream nodes instead of modules.")
-
-parser.add_argument("--n_batches", "-nb", type=int, default=1000, help="Number of batches to process.")
-parser.add_argument("--batch_size", "-bs", type=int, default=1, help="Number of examples to process in one go.")
-parser.add_argument("--steps", type=int, default=10, help="Number of steps to compute the attributions (precision of Integrated Gradients).")
-
-parser.add_argument("--aggregation", "-agg", type=str, default="sum", help="Aggregation method to contract across sequence length.")
-
-parser.add_argument("--node_threshold", "-nt", type=float, default=0.)
-parser.add_argument("--edge_threshold", "-et", type=float, default=0.1)
-
-parser.add_argument("--ctx_len", "-cl", type=int, default=16, help="Maximum sequence lenght of example sequences")
-
-parser.add_argument("--save_path", "-path", type=str, default='/scratch/pyllm/dhimoila/output/', help="Path to save and load the outputs.")
-
-# There is a strange recursive call error with nnsight when using multiprocessing...
-DEBUG = True
+parser.add_argument("--load_path", "-load_path", type=str, default='/scratch/pyllm/dhimoila/output/', help="Path to load the inputs.")
+parser.add_argument("--save_path", "-save_path", type=str, default='/scratch/pyllm/dhimoila/output/', help="Path to save and load the outputs.")
 
 args = parser.parse_args()
 
-idd = args.identity_dict
-svd = args.SVD_dict
-white = args.White_dict
+fit_cov = args.fit_cov
+sparsity_threshold = args.sparsity_threshold
+correlation_threshold = args.correlation_threshold
 
-if white:
-    raise NotImplementedError("Whitening is not implemented yet.")
+fit_graph = args.fit_graph
 
-get_attr = args.attribution
-get_act = args.activation
-
-n_batches = args.n_batches
-batch_size = args.batch_size
+load_path = args.load_path
 save_path = args.save_path
-
-edge_threshold = args.edge_threshold
-node_threshold = args.node_threshold
 
 ##########
 # Imports
 ##########
 
-import graph_tool.all as gt
-
 import os
 
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
-multiprocessing.set_start_method('spawn', force=True)
-
+import graph_tool.all as gt
 import torch
-from nnsight import LanguageModel
-from datasets import load_dataset
-
-from transformers import logging
-logging.set_verbosity_error()
-
-from tqdm import tqdm
-
-from welford_torch import OnlineCovariance
-
-from dictionary_learning import AutoEncoder
-from dictionary_learning.dictionary import IdentityDict, LinearDictionary
-from data.buffer import TokenBatches
-
-from circuit import get_activation
+from evaluation.SBM import cov2corr, fit_nested_SBM, plot_hierarchy, plot_3D_hierarchy, plot_block_corr, plot_block_prob, plot_distribution_fit
 
 print("Done importing.")
 
@@ -197,27 +149,17 @@ def fit_SBM(cov):
     # state.draw(output=save_path + f"nested_SBM_complete.svg")
     # print("Done.")
 
-
-
 if __name__ == "__main__":
     JSON_args = {
-        'generate_cov': args.generate_cov,
-        'fit_cov': args.fit_cov,
-        'identity_dict': idd,
-        'SVD_dict': svd,
-        'White_dict': args.White_dict,
-        'activation': get_act,
-        'attribution': get_attr,
-        'use_resid': args.use_resid,
-        'n_batches': n_batches,
-        'batch_size': batch_size,
-        'steps': args.steps,
-        'aggregation': args.aggregation,
-        'node_threshold': args.node_threshold,
-        'edge_threshold': args.edge_threshold,
-        'ctx_len': args.ctx_len,
-        'save_path': save_path,
+        "fit_cov": fit_cov,
+        "sparsity_threshold": sparsity_threshold,
+        "correlation_threshold": correlation_threshold,
+        "fit_graph": fit_graph,
+        "load_path": load_path,
+        "save_path": save_path,
     }
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     print("Saving at : ", save_path)
     if not os.path.exists(save_path):
@@ -227,22 +169,16 @@ if __name__ == "__main__":
     with open(save_path + "args.json", "w") as f:
         json.dump(JSON_args, f)
 
-    if args.generate_cov:
-        cov = generate_cov()
-        if get_act:
-            print("Saving activations...", end="")
-            torch.save(cov['act'], save_path + "act_cov.pt")
-            print("Done.")
-        if get_attr:
-            print("Saving attributions...", end="")
-            torch.save(cov['attr'], save_path + "attr_cov.pt")
-            print("Done.")
-    
     if args.fit_cov:
-        if get_act:
-            act_cov = torch.load(save_path + "act_cov.pt", map_location='cpu')
-            fit_SBM(act_cov)
-        if get_attr:
-            attr_cov = torch.load(save_path + "attr_cov.pt", map_location='cpu')
-            fit_SBM(attr_cov)
-        
+        print("Getting correlation matrix")
+        cov = torch.load(load_path, map_location=device)
+        cov = cov.cov.detach()
+        print("Covariance shape :", cov.shape)
+        cov = cov2corr(cov)
+
+        print("Fitting SBM")
+        state = fit_nested_SBM(cov, already_correlation=True)
+
+        print("Plotting")
+        plot_hierarchy(state, save_path=save_path + "hierarchy.pdf")
+        plot_block_corr(cov, state, already_correlation=True, save_path=save_path + "block_corr.png")

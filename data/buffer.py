@@ -63,17 +63,18 @@ class TokenBatches:
                     self.ctx_len - 1 - torch.randn(clean_tokens.size(0), device=clean_tokens.device).abs() * 5,
                     torch.tensor([1]).to(clean_tokens.device).expand(clean_tokens.size(0))
                 ).long()
+                trg = clean_tokens[torch.arange(clean_tokens.size(0)), trg_idx+1]
             elif self.ctx_len is None or self.ctx_len <= 0:
-                clean_tokens = tokenizer(batch["clean"], return_tensors='pt', padding='max_length', truncation=True, return_attention_mask=False, return_token_type_ids=False)['input_ids'].to(self.device)
+                clean_tokens = tokenizer(batch["clean"], return_tensors='pt', padding=True, return_attention_mask=False, return_token_type_ids=False)['input_ids'].to(self.device)
                 trg_idx = torch.zeros(clean_tokens.size(0), device=clean_tokens.device).long() - 2
                 trg = clean_tokens[torch.arange(clean_tokens.size(0)), trg_idx+1]
                 if self.corr_field is not None:
-                    corr_tokens = tokenizer(batch["corr"], return_tensors='pt', padding='max_length', truncation=True, return_attention_mask=False, return_token_type_ids=False)['input_ids'].to(self.device)
+                    corr_tokens = tokenizer(batch["corr"], return_tensors='pt', padding=True, return_attention_mask=False, return_token_type_ids=False)['input_ids'].to(self.device)
                     if corr_tokens.shape != clean_tokens.shape:
                         raise ValueError(f"Shape of tokenized clean -{clean_tokens.shape}- and corr -{corr_tokens.shape}- don't match. Please check that counterfactuals always have the same length as the clean text.")
                     corr_trg = corr_tokens[torch.arange(corr_tokens.size(0)), trg_idx+1]
                 elif self.distractor_field is not None:
-                    corr_trg = tokenizer(batch["distractor"], return_tensors='pt', padding='max_length', truncation=True, return_attention_mask=False, return_token_type_ids=False)['input_ids'].to(self.device)
+                    corr_trg = tokenizer(batch["distractor"], return_tensors='pt', padding=True, return_attention_mask=False, return_token_type_ids=False)['input_ids'].to(self.device)
             else:
                 raise ValueError("ctx_len must be None or scalar")
             
@@ -141,16 +142,17 @@ def bool_buffer(
         split='train',
 ):
     bool_data = load_from_disk(boolean_expressions_path)[split]
-    
-    bool_data = custom_iter(bool_data, text_field=['input', 'target'])
+    bool_iter = custom_iter(iter(bool_data), text_field=['input', 'target'])
+
+    print("Bool num rows", bool_data.num_rows)
 
     buffer = TokenBatches(
-        bool_data,
+        bool_iter,
         model,
         ctx_len=None,
         batch_size=batch_size,
         device=device,
-        max_number_of_yields=bool_data.data.num_rows,
+        max_number_of_yields=bool_data.num_rows,
     )
 
     return buffer
@@ -163,16 +165,17 @@ def gp_buffer(
         split='train',
 ):
     gp_data = load_from_disk(gp_path)[split]
-    
-    gp_data = custom_iter(gp_data, text_field=['prefix', 'pronoun'], corr_field=['corr_prefix', 'corr_pronoun'])
+    gp_iter = custom_iter(iter(gp_data), text_field=['prefix', 'pronoun'], corr_field=['corr_prefix', 'corr_pronoun'])
+
+    print("GP num rows", gp_data.num_rows)
 
     buffer = TokenBatches(
-        gp_data,
+        gp_iter,
         model,
         ctx_len=None,
         batch_size=batch_size,
         device=device,
-        max_number_of_yields=gp_data.data.num_rows,
+        max_number_of_yields=gp_data.num_rows,
         corr_field='corr',
     )
 
@@ -186,16 +189,17 @@ def gt_buffer(
         split='train',
 ):
     gt_data = load_from_disk(gt_path)[split]
+    gt_iter = custom_iter(iter(gt_data), text_field='prefix', corr_field='corr_prefix')
 
-    gt_data = custom_iter(gt_data, text_field='prefix', corr_field='corr_prefix')
+    print("GT num rows", gt_data.num_rows)
 
     buffer = TokenBatches(
-        gt_data,
+        gt_iter,
         model,
         ctx_len=None,
         batch_size=batch_size,
         device=device,
-        max_number_of_yields=gt_data.data.num_rows,
+        max_number_of_yields=gt_data.num_rows,
         corr_field='corr',
     )
     
@@ -209,16 +213,17 @@ def ioi_buffer(
         split='train',
 ):
     ioi_data = load_from_disk(ioi_path)[split]
-    
-    ioi_data = custom_iter(ioi_data, text_field='ioi_sentences', corr_field='corr_ioi_sentences')
+    ioi_iter = custom_iter(iter(ioi_data), text_field='ioi_sentences', corr_field='corr_ioi_sentences')
+
+    print("IOI num rows", ioi_data.num_rows)
 
     buffer = TokenBatches(
-        ioi_data,
+        ioi_iter,
         model,
         ctx_len=None,
         batch_size=batch_size,
         device=device,
-        max_number_of_yields=ioi_data.data.num_rows,
+        max_number_of_yields=ioi_data.num_rows,
         corr_field='corr',
     )
     
@@ -232,11 +237,11 @@ def mixture_buffer(
         split='train',
 ):
     gp_data = load_from_disk(gp_path)[split]
-    gp_data = custom_iter(gp_data, text_field=['prefix', 'pronoun'], corr_field=['corr_prefix', 'corr_pronoun'])
+    gp_iter = custom_iter(iter(gp_data), text_field=['prefix', 'pronoun'], corr_field=['corr_prefix', 'corr_pronoun'])
     gt_data = load_from_disk(gt_path)[split]
-    gt_data = custom_iter(gt_data, text_field='prefix', corr_field='corr_prefix')
+    gt_iter = custom_iter(iter(gt_data), text_field='prefix', corr_field='corr_prefix')
     ioi_data = load_from_disk(ioi_path)[split]
-    ioi_data = custom_iter(ioi_data, text_field='ioi_sentences', corr_field='corr_ioi_sentences')
+    ioi_iter = custom_iter(iter(ioi_data), text_field='ioi_sentences', corr_field='corr_ioi_sentences')
 
     class random_iter:
         def __init__(self, datasets):
@@ -249,12 +254,12 @@ def mixture_buffer(
             return next(random.choice(self.datasets))
         
     buffer = TokenBatches(
-        random_iter([gp_data, gt_data, ioi_data]),
+        random_iter([gp_iter, gt_iter, ioi_iter]),
         model,
         ctx_len=None,
         batch_size=batch_size,
         device=device,
-        max_number_of_yields=min(gp_data.data.num_rows, gt_data.data.num_rows, ioi_data.data.num_rows) * 3,
+        max_number_of_yields=min(gp_data.num_rows, gt_data.num_rows, ioi_data.num_rows) * 3,
         corr_field='corr',
     )
 

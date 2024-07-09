@@ -74,11 +74,12 @@ def faithfulness(
     results = {}
 
     # get metric on original model
-    print("Printing clean :")
-    print(type(clean))
-    print(clean)
     with model.trace(clean):
-        clean_logits = model.output[0][torch.arange(metric_fn_kwargs['trg'][0].numel()), metric_fn_kwargs['trg'][0]].save()
+        if isinstance(model.output, tuple):
+            clean_logits = model.output[0]
+        else:
+            clean_logits = model.output
+        clean_logits = clean_logits[torch.arange(metric_fn_kwargs['trg'][0].numel()), metric_fn_kwargs['trg'][0]].save()
         if isinstance(metric_fn, dict):
             metric = {}
             for name, fn in metric_fn.items():
@@ -88,16 +89,7 @@ def faithfulness(
                     metric[name] = fn(model, **metric_fn_kwargs).save()
         else:
             metric = metric_fn(model, **metric_fn_kwargs).save()
-    
-    print("Metric is : ", type(metric))
-    if isinstance(metric, dict):
-        results['complete'] = {}
-        print("Metric is a dict")
-        for name, value in metric.items():
-            print(f"Metric {name} : {value.value.mean().item()}")
-            results['complete'][name] = value.value.mean().item()
-    else:
-        results['complete'] = metric.value.mean().item()
+    results['complete'] = metric
 
     # get metric on empty graph
     mask = get_mask(circuit, -1)
@@ -166,12 +158,15 @@ def faithfulness(
             results[threshold]['faithfulness'] = {}
             for name, value in metric.items():
                 if "MRR" in name or "acc" in name:
-                    results[threshold]['faithfulness'][name] = threshold_result[name] / results['complete'][name]
+                    if results['complete'][name] == 0:
+                        results[threshold]['faithfulness'][name] = 1
+                    else:
+                        results[threshold]['faithfulness'][name] = threshold_result[name] / results['complete'][name]
                 elif name == "KL":
                     results[threshold]['faithfulness'][name] = threshold_result[name]
                 else:
                     results[threshold]['faithfulness'][name] = (threshold_result[name] - empty[name]) / (results['complete'][name] - empty[name])
         else:
             results[threshold]['faithfulness'] = (threshold_result - empty) / (metric - empty)
-    
+
     return results

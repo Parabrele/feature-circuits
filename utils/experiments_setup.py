@@ -1,34 +1,66 @@
 import torch
 
 from nnsight import LanguageModel
+from nnsight.models.UnifiedTransformer import UnifiedTransformer
 from utils.dictionary import IdentityDict, LinearDictionary, AutoEncoder
 
-def load_model_and_modules(device): 
-    pythia70m = LanguageModel(
-        "EleutherAI/pythia-70m-deduped",
-        device_map=device,
-        dispatch=True,
-    )
+def load_model_and_modules(device, unified=False, model_name="EleutherAI/pythia-70m-deduped"):
+    if unified:
+        model = UnifiedTransformer(
+            model_name,
+            device=device,
+            processing=False,
+        )
+        model.tokenizer.padding_side = 'left'
 
-    pythia70m_embed = pythia70m.gpt_neox.embed_in
+        embed = model.embed
 
-    pythia70m_resids = []
-    pythia70m_attns = []
-    pythia70m_mlps = []
-    for layer in range(len(pythia70m.gpt_neox.layers)):
-        pythia70m_resids.append(pythia70m.gpt_neox.layers[layer])
-        pythia70m_attns.append(pythia70m.gpt_neox.layers[layer].attention)
-        pythia70m_mlps.append(pythia70m.gpt_neox.layers[layer].mlp)
+        resids = []
+        attns = []
+        mlps = []
+        for layer in range(len(model.blocks)):
+            resids.append(model.blocks[layer])
+            attns.append(model.blocks[layer].attn)
+            mlps.append(model.blocks[layer].mlp)
 
-    submod_names = {
-        pythia70m.gpt_neox.embed_in : 'embed'
-    }
-    for i in range(len(pythia70m.gpt_neox.layers)):
-        submod_names[pythia70m.gpt_neox.layers[i].attention] = f'attn_{i}'
-        submod_names[pythia70m.gpt_neox.layers[i].mlp] = f'mlp_{i}'
-        submod_names[pythia70m.gpt_neox.layers[i]] = f'resid_{i}'
+        submod_names = {
+            model.embed : 'embed'
+        }
+        for i in range(len(model.blocks)):
+            submod_names[model.blocks[i].attn] = f'attn_{i}'
+            submod_names[model.blocks[i].mlp] = f'mlp_{i}'
+            submod_names[model.blocks[i]] = f'resid_{i}'
 
-    return pythia70m, pythia70m_embed, pythia70m_resids, pythia70m_attns, pythia70m_mlps, submod_names
+        return model, embed, resids, attns, mlps, submod_names
+    
+    else:
+        if model_name != "EleutherAI/pythia-70m-deduped":
+            raise NotImplementedError("Only EleutherAI/pythia-70m-deduped is supported for non-unified models.")
+        model = LanguageModel(
+            model_name,
+            device_map=device,
+            dispatch=True,
+        )
+
+        embed = model.gpt_neox.embed_in
+
+        resids = []
+        attns = []
+        mlps = []
+        for layer in range(len(model.gpt_neox.layers)):
+            resids.append(model.gpt_neox.layers[layer])
+            attns.append(model.gpt_neox.layers[layer].attention)
+            mlps.append(model.gpt_neox.layers[layer].mlp)
+
+        submod_names = {
+            model.gpt_neox.embed_in : 'embed'
+        }
+        for i in range(len(model.gpt_neox.layers)):
+            submod_names[model.gpt_neox.layers[i].attention] = f'attn_{i}'
+            submod_names[model.gpt_neox.layers[i].mlp] = f'mlp_{i}'
+            submod_names[model.gpt_neox.layers[i]] = f'resid_{i}'
+
+        return model, embed, resids, attns, mlps, submod_names
 
 def load_saes(
     model,

@@ -40,7 +40,10 @@ import os
 
 import graph_tool.all as gt
 import torch
+
 from evaluation.SBM import cov2corr, fit_nested_SBM, plot_hierarchy, plot_3D_hierarchy, plot_block_corr, plot_block_prob, plot_distribution_fit
+
+from utils.graph_utils import to_graph
 
 print("Done importing.")
 
@@ -182,3 +185,12 @@ if __name__ == "__main__":
         print("Plotting")
         plot_hierarchy(state, save_path=save_path + "hierarchy.pdf")
         plot_block_corr(cov, state, already_correlation=True, save_path=save_path + "block_corr.png")
+    
+    if args.fit_graph:
+        print("Getting the graph")
+        graph = torch.load(load_path, map_location=device)
+        if "nodes" in graph:
+            nodes = graph["nodes"]
+        edges = graph["edges"]
+        graph = to_graph(edges)
+        

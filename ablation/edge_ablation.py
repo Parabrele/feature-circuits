@@ -30,7 +30,7 @@ def run_graph(
         mod2name,
         clean,
         patch,
-        graph,
+        mask,
         metric_fn,
         metric_fn_kwargs,
         ablation_fn,
@@ -49,7 +49,7 @@ def run_graph(
         the input to the model
     patch : None, str, list of str or tensor (batch, seq_len)
         the counterfactual input to the model to ablate edges
-    graph : edges
+    mask : edges or tuple(nodes, edges)
         the graph to use. Accept any type of sparse_coo tensor, but preferably bool.
         Any index in these tensors will be used as an edge.
     metric_fn : callable
@@ -67,7 +67,9 @@ def run_graph(
     """
 
     # various initializations
-    graph = reorder_mask(graph)
+    if isinstance(mask, tuple):
+        mask = mask[1]
+    graph = reorder_mask(mask)
 
     if complement:
         raise NotImplementedError("Complement is not implemented yet")
@@ -138,7 +140,6 @@ def run_graph(
         # so until a better solution is found, I will do this.
         # TODO : check that the result between this and all features being potentially alive are the same
         #        or close enough on a few examples to validate this choice.
-        # TODO : of course, mention it in the paper.
         # TOD? : for features whose masks are all zeros, skip and keep only the patch state
         
         potentially_alive = torch.zeros(f.shape[-1] + 1, device=f.device, dtype=torch.bool)

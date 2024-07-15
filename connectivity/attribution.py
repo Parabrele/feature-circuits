@@ -22,78 +22,84 @@ def y_effect(
     hidden_states_clean,
     hidden_states_patch,
     last_layer,
+    submods,
     dictionaries,
     is_tuple,
     steps,
     metric_fn,
     metric_kwargs=dict(),
     normalise_edges=False,
+    node_threshold=0.1,
     edge_threshold=0.01,
     features_by_submod={},
 ):
     """
     Get the last layer Integrated Gradient attribution effect on the output.
     """
-    dictionary = dictionaries[last_layer]
-    clean_state = hidden_states_clean[last_layer]
-    patch_state = hidden_states_patch[last_layer]
+    node_effects = {}
+    for submod in submods:
+        dictionary = dictionaries[submod]
+        clean_state = hidden_states_clean[submod]
+        patch_state = hidden_states_patch[submod]
 
-    with model.trace(**tracer_kwargs) as tracer:
-        metrics = []
-        fs = []
-        for step in range(steps):
-            alpha = step / steps
-            upstream_act = (1 - alpha) * clean_state + alpha * patch_state
-            upstream_act.act.retain_grad()
-            upstream_act.res.retain_grad()
-            fs.append(upstream_act)
-            with tracer.invoke(clean, scan=tracer_kwargs['scan']):
-                if is_tuple[last_layer]:
-                    last_layer.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
-                else:
-                    last_layer.output = dictionary.decode(upstream_act.act) + upstream_act.res
-                metrics.append(metric_fn(model, **metric_kwargs))
-        metric = sum([m for m in metrics])
-        metric.sum().backward(retain_graph=True)
+        with model.trace(**tracer_kwargs) as tracer:
+            metrics = []
+            fs = []
+            for step in range(steps):
+                alpha = step / steps
+                upstream_act = (1 - alpha) * clean_state + alpha * patch_state
+                upstream_act.act.retain_grad()
+                upstream_act.res.retain_grad()
+                fs.append(upstream_act)
+                with tracer.invoke(clean, scan=tracer_kwargs['scan']):
+                    if is_tuple[submod]:
+                        submod.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
+                    else:
+                        submod.output = dictionary.decode(upstream_act.act) + upstream_act.res
+                    metrics.append(metric_fn(model, **metric_kwargs))
+            metric = sum([m for m in metrics])
+            metric.sum().backward(retain_graph=True)
 
-    mean_grad = sum([f.act.grad for f in fs]) / steps
-    mean_residual_grad = sum([f.res.grad for f in fs]) / steps
-    grad = SparseAct(act=mean_grad, res=mean_residual_grad)
-    delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
-    effect = (grad @ delta).abs()
-    max_effect = effect
+        mean_grad = sum([f.act.grad for f in fs]) / steps
+        mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+        grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+        delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+        effect = (grad @ delta).abs()
+        node_effects[submod] = effect
 
-    effect = effect.to_tensor().flatten()
-    if normalise_edges:
-        if clean_state.act.size(0) > 1:
-            raise NotImplementedError("Batch size > 1 not implemented yet.")
-        tot_eff = effect.sum()
-        effect = effect / tot_eff
+        if submod == last_layer:
+            effect = effect.to_tensor().flatten()
+            if normalise_edges:
+                if clean_state.act.size(0) > 1:
+                    raise NotImplementedError("Batch size > 1 not implemented yet.")
+                tot_eff = effect.sum()
+                effect = effect / tot_eff
 
-        perm = t.argsort(effect, descending=True)
-        perm_inv = t.argsort(perm)
+                perm = t.argsort(effect, descending=True)
+                perm_inv = t.argsort(perm)
 
-        cumsum = t.cumsum(effect[perm], dim=0)
-        mask = cumsum < edge_threshold
-        first_zero_idx = t.where(mask == 0)[0][0]
-        mask[first_zero_idx] = 1
-        mask = mask[perm_inv]
+                cumsum = t.cumsum(effect[perm], dim=0)
+                mask = cumsum < edge_threshold
+                first_zero_idx = t.where(mask == 0)[0][0]
+                mask[first_zero_idx] = 1
+                mask = mask[perm_inv]
 
-        effect = t.where(
-            mask,
-            effect,
-            t.zeros_like(effect)
-        ).to_sparse()
-    else:
-        effect = t.where(
-                effect.abs() > edge_threshold,
-                effect,
-                t.zeros_like(effect)
-            ).to_sparse()
+                effect = t.where(
+                    mask,
+                    effect,
+                    t.zeros_like(effect)
+                ).to_sparse()
+            else:
+                effect = t.where(
+                        effect.abs() > max(edge_threshold, node_threshold),
+                        effect,
+                        t.zeros_like(effect)
+                    ).to_sparse()
+                
+            last_effect = effect
+            features_by_submod[last_layer] = effect.coalesce().indices()[0].unique().tolist()
 
-    features_by_submod[last_layer] = effect.coalesce().indices()[0].unique().tolist()
-
-    return effect, max_effect
+    return last_effect, node_effects
 
 @t.no_grad()
 def get_effect(
@@ -109,6 +115,8 @@ def get_effect(
     is_tuple,
     steps,
     normalise_edges,
+    nodes,
+    node_threshold,
     edge_threshold,
 ):
     """
@@ -190,8 +198,6 @@ def get_effect(
         d_upstream_contracted = t.tensor(upstream_act.act.size())
         d_upstream_contracted[-1] += 1
         d_upstream_contracted = d_upstream_contracted.prod()
-        
-        max_effect = None
 
         # TODO : try to compile that loop
         for downstream_feat, fs_grad in zip(downstream_features, Jack):
@@ -205,7 +211,7 @@ def get_effect(
             delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
             effect = (grad @ delta).abs()
             
-            flat_effect = effect.to_tensor().flatten()
+            effect = effect.to_tensor().flatten()
 
             if normalise_edges:
                 """
@@ -215,8 +221,8 @@ def get_effect(
                 if clean_state.act.size(0) > 1:
                     raise NotImplementedError("Batch size > 1 not implemented yet.")
 
-                effect_indices[downstream_feat] = flat_effect.nonzero().squeeze(-1)
-                effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
+                effect_indices[downstream_feat] = effect.nonzero().squeeze(-1)
+                effect_values[downstream_feat] = effect[effect_indices[downstream_feat]]
                 tot_eff = effect_values[downstream_feat].sum()
                 effect_values[downstream_feat] = effect_values[downstream_feat] / tot_eff
 
@@ -231,18 +237,12 @@ def get_effect(
 
             else :
                 effect_indices[downstream_feat] = t.where(
-                    flat_effect.abs() > edge_threshold,
-                    flat_effect,
-                    t.zeros_like(flat_effect)
+                    effect.abs() > edge_threshold,
+                    effect,
+                    t.zeros_like(effect)
                 ).nonzero().squeeze(-1)
 
-                effect_values[downstream_feat] = flat_effect[effect_indices[downstream_feat]]
-
-            if max_effect is None:
-                max_effect = effect
-            else:
-                max_effect.act = t.where(effect.act.abs() > max_effect.act.abs(), effect.act, max_effect.act)
-                max_effect.resc = t.where(effect.resc.abs() > max_effect.resc.abs(), effect.resc, max_effect.resc)
+                effect_values[downstream_feat] = effect[effect_indices[downstream_feat]]
 
         # converts the dictionary of indices to a tensor of indices
         effect_indices = t.tensor(
@@ -251,15 +251,20 @@ def get_effect(
         ).to(device)
         effect_values = t.cat([effect_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
 
-        
-        features_by_submod[upstream_submod] = effect_indices[1].unique().tolist()
+        potential_upstream_features = effect_indices[1] # list of indices
+        # now, in nodes[upstream_submod], we have the effect of upstream_submod on the final output. Keep only the features that have a total effect above the threshold
+        upstream_mask = nodes[upstream_submod].to_tensor().flatten()[potential_upstream_features].abs() > node_threshold
+        features_by_submod[upstream_submod] = potential_upstream_features[upstream_mask].unique().tolist()
+
+        effect_indices = effect_indices[:, upstream_mask]
+        effect_values = effect_values[upstream_mask]
 
         #print(f"Done computing effects for layer {layer}, found {len(effect_values)} edges & {len(features_by_submod[upstream_submod])} features")
         
         return t.sparse_coo_tensor(
             effect_indices, effect_values,
             (d_downstream_contracted, d_upstream_contracted)
-        ), max_effect
+        )
 
 def head_attribution(
     clean,

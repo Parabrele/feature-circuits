@@ -1,10 +1,14 @@
 import os
+import math
+
+import torch
 
 from graphviz import Digraph
 from collections import defaultdict
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy import interpolate
 
 def plot_faithfulness(
         outs,
@@ -123,6 +127,61 @@ def plot_faithfulness(
     fig.write_html(save_path + "faithfulness.html")
 
 # Functions defined by Marks et al. Here only for compatibility.
+def marks_plot_faithfulness(outs, thresholds):
+    # plot faithfulness results
+    fig = go.Figure()
+
+    colors = {
+        'features' : 'blue',
+        'features_wo_errs' : 'red',
+        'features_wo_some_errs' : 'green',
+        'neurons' : 'purple',
+        # 'random_features' : 'black'
+    }
+
+    y_min = 0
+    y_max = 1
+    for setting, subouts in outs.items():
+        x_min = max([min(subouts[t]['n_nodes'] for t in thresholds)]) + 1
+        x_max = min([max(subouts[t]['n_nodes'] for t in thresholds)]) - 1
+        fs = {
+            "ioi" : interpolate.interp1d([subouts[t]['n_nodes'] for t in thresholds], [subouts[t]['faithfulness'] for t in thresholds])
+        }
+        xs = torch.logspace(math.log10(x_min), math.log10(x_max), 100, 10).tolist()
+
+        fig.add_trace(go.Scatter(
+            x = [subouts[t]['n_nodes'] for t in thresholds],
+            y = [subouts[t]['faithfulness'] for t in thresholds],
+            mode='lines', line=dict(color=colors[setting]), opacity=0.17, showlegend=False
+        ))
+
+        y_min = min(y_min, min([subouts[t]['faithfulness'] for t in thresholds]))
+        y_max = max(y_max, max([subouts[t]['faithfulness'] for t in thresholds]))
+
+        fig.add_trace(go.Scatter(
+            x=xs,
+            y=[ sum([f(x) for f in fs.values()]) / len(fs) for x in xs ],
+            mode='lines', line=dict(color=colors[setting]), name=setting
+        ))
+
+    fig.update_xaxes(type="log", range=[math.log10(x_min), math.log10(x_max)])
+    fig.update_yaxes(range=[y_min, min(y_max, 2)])
+
+    fig.update_layout(
+        xaxis_title='Nodes',
+        yaxis_title='Faithfulness',
+        width=800,
+        height=375,
+        # set white background color
+        plot_bgcolor='rgba(0,0,0,0)',
+        # add grey gridlines
+        yaxis=dict(gridcolor='rgb(200,200,200)',mirror=True,ticks='outside',showline=True),
+        xaxis=dict(gridcolor='rgb(200,200,200)', mirror=True, ticks='outside', showline=True),
+
+    )
+
+    # fig.show()
+    fig.write_image('faithfulness.pdf')
 
 def get_name(component, layer, idx):
     match idx:

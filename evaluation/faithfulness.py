@@ -1,6 +1,7 @@
 import torch
 
-from ablation.edge_ablation import run_graph
+from ablation.edge_ablation import run_graph as run_edge_ablation
+from ablation.node_ablation import run_graph as run_node_ablation
 
 from utils.activation import SparseAct
 from utils.graph_utils import get_mask, prune, get_n_nodes, get_n_edges, get_density
@@ -23,6 +24,7 @@ def faithfulness(
         ablation_fn=None,
         default_ablation='mean',
         get_graph_info=True,
+        node_ablation=False
     ):
     """
     model : nnsight model
@@ -70,6 +72,11 @@ def faithfulness(
             ablation_fn = lambda x: SparseAct(torch.zeros_like(x.act), torch.zeros_like(x.res))
         else:
             raise ValueError(f"Unknown default ablation function : {default_ablation}")
+    
+    if node_ablation:
+        run_graph = run_node_ablation
+    else:
+        run_graph = run_edge_ablation
         
     results = {}
 
@@ -89,10 +96,17 @@ def faithfulness(
                     metric[name] = fn(model, **metric_fn_kwargs).save()
         else:
             metric = metric_fn(model, **metric_fn_kwargs).save()
-    results['complete'] = metric
+    
+    if isinstance(metric, dict):
+        results['complete'] = {}
+        for name, value in metric.items():
+            results['complete'][name] = value.value.mean().item()
+    else:
+        results['complete'] = metric.value.mean().item()
 
     # get metric on empty graph
-    mask = get_mask(circuit, -1)
+    print("Circuit keys :", circuit[0].keys(), circuit[1].keys())
+    mask = get_mask(circuit, -1, threshold_on_nodes=node_ablation)
     empty = run_graph(
         model,
         submodules,
@@ -113,14 +127,16 @@ def faithfulness(
         print(f"Threshold {i+1}/{len(thresholds)} : {threshold}")
         results[threshold] = {}
 
-        mask = get_mask(circuit, threshold)
-        pruned = prune(mask)
+        mask = get_mask(circuit, threshold, threshold_on_nodes=node_ablation)
+        #if not node_ablation:
+        mask = (mask[0], prune(mask[1]))
 
         if get_graph_info:
-            results[threshold]['n_nodes'] = get_n_nodes(pruned)
-            results[threshold]['n_edges'] = get_n_edges(pruned)
+            results[threshold]['n_nodes'] = get_n_nodes(mask[1])
+            results[threshold]['n_edges'] = get_n_edges(mask[1])
+            print("n_nodes :", results[threshold]['n_nodes'], "n_edges :", results[threshold]['n_edges'])
             results[threshold]['avg_deg'] = results[threshold]['n_edges'] / (results[threshold]['n_nodes'] if results[threshold]['n_nodes'] > 0 else 1)
-            results[threshold]['density'] = get_density(pruned)
+            results[threshold]['density'] = get_density(mask[1])
             # TODO : results[threshold]['modularity'] = modularity, as in kaarel, as in modularity in NN paper, as in me
             #        results[threshold]['z_score'] = Z_score(pruned)
             
@@ -131,7 +147,7 @@ def faithfulness(
             name_dict,
             clean,
             patch,
-            pruned,
+            mask,
             metric_fn,
             metric_fn_kwargs,
             ablation_fn,

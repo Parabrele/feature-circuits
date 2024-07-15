@@ -1,7 +1,3 @@
-"""
-This is unmodified code from marks et al, for compatibility.
-"""
-
 import torch as t
 from argparse import ArgumentParser
 from nnsight import LanguageModel
@@ -10,6 +6,82 @@ from utils.dictionary import AutoEncoder, IdentityDict
 
 from utils.activation import SparseAct
 from utils.utils import load_examples
+
+@t.no_grad()
+def run_graph(
+        model,
+        submodules,
+        dictionaries,
+        mod2name,
+        clean,
+        patch,
+        mask,
+        metric_fn,
+        metric_fn_kwargs,
+        ablation_fn,
+        complement=False,
+        clean_logits=None,
+    ):
+    if isinstance(mask, tuple):
+        print("In run graph, mask is a tuple with", mask[0].keys(), mask[1].keys())
+        graph_nodes = mask[0]
+    else:
+        graph_nodes = mask
+    if patch is None: patch = clean
+    patch_states = {}
+
+    with model.trace(patch), t.no_grad():
+        for submodule in submodules:
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if type(x.shape) == tuple:
+                x = x[0]
+            x_hat, f = dictionary(x, output_features=True)
+            patch_states[submodule] = SparseAct(act=f, res=x - x_hat).save()
+    patch_states = {k : ablation_fn(v.value) for k, v in patch_states.items()}
+    
+    with model.trace(clean), t.no_grad():
+        for submodule in submodules:
+            submod_name = mod2name[submodule]
+            dictionary = dictionaries[submodule]
+            print(graph_nodes.keys())
+            submod_nodes = graph_nodes[submod_name].clone()
+            x = submodule.output
+            is_tuple = type(x.shape) == tuple
+            if is_tuple:
+                x = x[0]
+            f = dictionary.encode(x)
+            res = x - dictionary(x)
+
+            # ablate features
+            if complement: submod_nodes = ~submod_nodes
+            submod_nodes.resc = submod_nodes.resc.expand(*submod_nodes.resc.shape[:-1], res.shape[-1])
+
+            f[...,~submod_nodes.act] = patch_states[submodule].act[...,~submod_nodes.act]
+            res[...,~submod_nodes.resc] = patch_states[submodule].res[...,~submod_nodes.resc]
+            
+            if is_tuple:
+                submodule.output[0][:] = dictionary.decode(f) + res
+            else:
+                submodule.output = dictionary.decode(f) + res
+
+        if isinstance(metric_fn, dict):
+            metric = {}
+            for name, fn in metric_fn.items():
+                if name == "KL":
+                    metric[name] = fn(model, clean_logits=clean_logits, **metric_fn_kwargs).save()
+                else:
+                    metric[name] = fn(model, **metric_fn_kwargs).save()
+        else:
+            metric = metric_fn(model, **metric_fn_kwargs).save()
+
+    if isinstance(metric, dict):
+        return {name : value.value.mean().item() for name, value in metric.items()}
+    return metric.value.mean().item()
+
+"""
+Below is unmodified code from marks et al, for compatibility.
+"""
 
 def run_with_ablations(
         clean, # clean inputs

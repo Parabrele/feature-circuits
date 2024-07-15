@@ -1,3 +1,10 @@
+"""
+python -m experiments.effective_correctness &
+"""
+NODE_THRESHOLD = 0.0001
+EDGE_THRESHOLD = 0.01
+NODE_ABLATION = True
+
 import torch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,11 +44,9 @@ print("Done.")
 clean = "When Mary and John went to the store, John gave a drink to"
 tokens = pythia70m.tokenizer(clean, return_tensors="pt")
 trg_idx = torch.tensor([-1]).to(device)
-trg_str = " Mary"
-trg = tokens["input_ids"].to(device)[0][1]
+trg = tokens["input_ids"].to(device)[0][2].reshape(1)
 
 print("clean:", clean)
-print("trg_str:", trg_str)
 print("trg:", trg)
 print("trg_idx:", trg_idx)
 
@@ -59,7 +64,9 @@ circuit = get_circuit(
     dictionaries=dictionaries,
     metric_fn=metric_fn_logit,
     metric_kwargs={"trg": (trg_idx, trg)},
-    edge_threshold=0.1,
+    edge_threshold=EDGE_THRESHOLD,
+    node_threshold=NODE_THRESHOLD,
+    nodes_only=False#NODE_ABLATION,
 )
 print("Done.")
 
@@ -82,7 +89,7 @@ for i in range(max(start_at_layer, 0), n_layers):
 from evaluation.faithfulness import faithfulness
 
 print("Evaluating faithfulness...")
-thresholds = torch.logspace(-2, 2, 15, 10).tolist()
+thresholds = torch.logspace(-2, 0, 5, 10).tolist()
 faith = faithfulness(
     pythia70m,
     submodules=submodules,
@@ -96,6 +103,7 @@ faith = faithfulness(
     patch=None,
     default_ablation='zero',
     get_graph_info=True,
+    node_ablation=NODE_ABLATION,
 )
 print("Done.")
 

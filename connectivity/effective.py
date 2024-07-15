@@ -68,7 +68,9 @@ def get_circuit(
             normalise_edges=(method == 'resid_topk'),
             use_start_at_layer=False,
             aggregation=aggregation,
+            node_threshold=node_threshold,
             edge_threshold=edge_threshold,
+            nodes_only=nodes_only,
             steps=steps,
             dump_all=dump_all,
             save_path=save_path,
@@ -86,7 +88,9 @@ def get_circuit_resid_only(
         normalise_edges=False, # whether to divide the edges entering a node by their sum
         use_start_at_layer=False, # Whether to compute the layer-wise effects with the start at layer argument to save computation
         aggregation='max', # or 'none' for not aggregating across sequence position
+        node_threshold=0.1,
         edge_threshold=0.01,
+        nodes_only=False,
         steps=10,
         dump_all=False,
         save_path=None,
@@ -120,26 +124,38 @@ def get_circuit_resid_only(
     features_by_submod = {}
 
     # start by the effect of the last layer to the metric
-    edge_effect, node_effect = y_effect(
+    edge_effect, nodes_attr = y_effect(
         model,
         clean, hidden_states_clean, hidden_states_patch,
-        last_layer, dictionaries, is_tuple,
-        steps,
-        metric_fn, metric_kwargs,
-        normalise_edges, edge_threshold,
+        last_layer, all_submods,
+        dictionaries, is_tuple,
+        steps, metric_fn, metric_kwargs,
+        normalise_edges, node_threshold, edge_threshold,
         features_by_submod
     )
+    nodes = {}
+    print(f'resid_{len(resids)-1}')
+    nodes[f'resid_{len(resids)-1}'] = nodes_attr[last_layer]
 
-    nodes = {'y' : t.tensor([1.0]).to(node_effect.act.device)}
-    nodes[f'resid_{n_layers-1}'] = node_effect
+    if nodes_only:
+        for layer in reversed(range(n_layers)):
+            if layer > 0:
+                print(f'resid_{layer-1}')
+                nodes[f'resid_{layer-1}'] = nodes_attr[resids[layer-1]]
+            else:
+                print('embed')
+                nodes['embed'] = nodes_attr[embed]
 
+        print(nodes.keys())
+        return nodes, {}
+    
     edges = defaultdict(lambda:{})
     edges[f'resid_{len(resids)-1}'] = {'y' : edge_effect}
     
     # Now, backward through the model to get the effects of each layer on its successor.
     for layer in reversed(range(n_layers)):
-        print("Layer", layer, "threshold", edge_threshold)
-        print("Number of downstream features:", len(features_by_submod[resids[layer]]))
+        # print("Layer", layer, "threshold", edge_threshold)
+        # print("Number of downstream features:", len(features_by_submod[resids[layer]]))
         
         resid = resids[layer]
         if layer > 0:
@@ -147,20 +163,21 @@ def get_circuit_resid_only(
         else:
             prev_resid = embed
 
-        RR_effect, max_effect = get_effect(
+        RR_effect = get_effect(
             model,
             clean, hidden_states_clean, hidden_states_patch,
             dictionaries,
             layer, prev_resid, resid,
             features_by_submod,
-            is_tuple, steps, normalise_edges, edge_threshold
+            is_tuple, steps, normalise_edges,
+            nodes_attr, node_threshold, edge_threshold,
         )
     
         if layer > 0:
-            nodes[f'resid_{layer-1}'] = max_effect
+            nodes[f'resid_{layer-1}'] = nodes_attr[prev_resid]
             edges[f'resid_{layer-1}'][f'resid_{layer}'] = RR_effect
         else:
-            nodes['embed'] = max_effect
+            nodes['embed'] = nodes_attr[prev_resid]
             edges['embed'][f'resid_0'] = RR_effect
         
         gc.collect()

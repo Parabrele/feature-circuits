@@ -1,12 +1,10 @@
 """
 For future usage with different kinds of SAEs (like LIB, gated, etc.), nothing has to change except load_saes function.
-Also, currently the code is specific to pythia-70m-deduped model, but it can be trivially adapted to other models.
+Also, currently the some part of the code is specific to pythia-70m-deduped model, but it can be trivially adapted to other models.
 
 Example command to run this code :
 
-python main.py --test_correctness -da -et 0.1 -sp /scratch/pyllm/dhimoila/output/test_correctness_jack/&
-
-python main.py -gc -da -ec -cbs 2 -et 0.1 -cml 10 -eml 10 -sp /scratch/pyllm/dhimoila/output/test_correctness/&
+python -m experiments.main -gc -ec -et 0.1 -cbs 2 -cml 8 -ebs 2 -eml 10 --dataset ioi -sp /scratch/pyllm/dhimoila/output/ioi/&
 
 python main.py -ec -eml 10 -sp /scratch/pyllm/dhimoila/output/120624_01/esal0/ -cp /scratch/pyllm/dhimoila/output/120624_01/circuit/merged/ -esal 0&
 """
@@ -99,7 +97,6 @@ if __name__ == "__main__":
 
 import os
 import gc
-import math
 
 import cProfile
 
@@ -115,16 +112,15 @@ logging.set_verbosity_error()
 
 from tqdm import tqdm
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from scipy import interpolate
+from ablation.node_ablation import get_fcs
 
 from data.buffer import wikipedia_buffer, gp_buffer, gt_buffer, ioi_buffer, bool_buffer, mixture_buffer
-import evaluation
-from connectivity.effective import get_circuit
-from ablation.node_ablation import run_with_ablations
 
-from utils.activation import SparseAct
+from connectivity.effective import get_circuit
+
+from evaluation.faithfulness import faithfulness as faithfulness_fn
+
+from utils.plotting import plot_faithfulness, marks_plot_faithfulness
 from utils.savior import save_circuit, load_latest
 from utils.graph_utils import merge_circuits, mean_circuit
 from utils.metric_fns import metric_fn_KL, metric_fn_logit, metric_fn_acc, metric_fn_MRR
@@ -164,276 +160,6 @@ def run_main(device_id, step_1, step_2):
         metric_fn_dict["acc"] = metric_fn_acc
     if "MRR" in args.eval_metric:
         metric_fn_dict["MRR"] = metric_fn_MRR
-    
-    def marks_get_fcs(
-        model,
-        circuit,
-        clean,
-        trg_idx,
-        trg,
-        submodules,
-        dictionaries,
-        ablation_fn,
-        thresholds,
-        metric_fn,
-        dict_size,
-        submod_names,
-        handle_errors = 'default', # also 'remove' or 'resid_only'
-    ):
-        # get m(C) for the circuit obtained by thresholding nodes with the given threshold
-        clean_inputs = clean
-
-        # def metric_fn(model):
-        #     return (
-        #         - t.gather(model.embed_out.output[:,-1,:], dim=-1, index=patch_answer_idxs.view(-1, 1)).squeeze(-1) + \
-        #         t.gather(model.embed_out.output[:,-1,:], dim=-1, index=clean_answer_idxs.view(-1, 1)).squeeze(-1)
-        #     )
-        def metric_fn_(model):
-            return metric_fn(model, trg=(trg_idx, trg))
-        
-        circuit = circuit[0]
-
-        with torch.no_grad():
-            out = {}
-
-            # get F(M)
-            with model.trace(clean_inputs):
-                metric = metric_fn_(model).save()
-                
-            fm = metric.value.mean().item()
-
-            out['fm'] = fm
-
-            # get m(∅)
-            fempty = run_with_ablations(
-                clean_inputs,
-                None,
-                model,
-                submodules,
-                dictionaries,
-                nodes = {
-                    submod : SparseAct(
-                        act=torch.zeros(dict_size, dtype=torch.bool), 
-                        resc=torch.zeros(1, dtype=torch.bool)).to(DEVICE)
-                    for submod in submodules
-                },
-                metric_fn=metric_fn_,
-                ablation_fn=ablation_fn,
-            ).mean().item()
-            out['fempty'] = fempty
-
-            for threshold in thresholds:
-                out[threshold] = {}
-                nodes = {
-                    submod : circuit[submod_names[submod]].abs() > threshold for submod in submodules
-                }
-
-                if handle_errors == 'remove':
-                    for k in nodes: nodes[k].resc = torch.zeros_like(nodes[k].resc, dtype=torch.bool)
-                elif handle_errors == 'resid_only':
-                    for k in nodes:
-                        if k not in model.gpt_neox.layers: nodes[k].resc = torch.zeros_like(nodes[k].resc, dtype=torch.bool)
-
-                n_nodes = sum([n.act.sum() + n.resc.sum() for n in nodes.values()]).item()
-                out[threshold]['n_nodes'] = n_nodes
-                
-                out[threshold]['fc'] = run_with_ablations(
-                    clean_inputs,
-                    None,
-                    model,
-                    submodules,
-                    dictionaries,
-                    nodes=nodes,
-                    metric_fn=metric_fn_,
-                    ablation_fn=ablation_fn,
-                ).mean().item()
-                out[threshold]['fccomp'] = run_with_ablations(
-                    clean_inputs,
-                    None,
-                    model,
-                    submodules,
-                    dictionaries,
-                    nodes=nodes,
-                    metric_fn=metric_fn_,
-                    ablation_fn=ablation_fn,
-                    complement=True
-                ).mean().item()
-                out[threshold]['faithfulness'] = (out[threshold]['fc'] - fempty) / (fm - fempty)
-                out[threshold]['completeness'] = (out[threshold]['fccomp'] - fempty) / (fm - fempty)
-                
-        return out
-
-    def marks_plot_faithfulness(outs, thresholds):
-        # plot faithfulness results
-        fig = go.Figure()
-
-        colors = {
-            'features' : 'blue',
-            'features_wo_errs' : 'red',
-            'features_wo_some_errs' : 'green',
-            'neurons' : 'purple',
-            # 'random_features' : 'black'
-        }
-
-        y_min = 0
-        y_max = 1
-        for setting, subouts in outs.items():
-            x_min = max([min(subouts[t]['n_nodes'] for t in thresholds)]) + 1
-            x_max = min([max(subouts[t]['n_nodes'] for t in thresholds)]) - 1
-            fs = {
-                "ioi" : interpolate.interp1d([subouts[t]['n_nodes'] for t in thresholds], [subouts[t]['faithfulness'] for t in thresholds])
-            }
-            xs = torch.logspace(math.log10(x_min), math.log10(x_max), 100, 10).tolist()
-
-            fig.add_trace(go.Scatter(
-                x = [subouts[t]['n_nodes'] for t in thresholds],
-                y = [subouts[t]['faithfulness'] for t in thresholds],
-                mode='lines', line=dict(color=colors[setting]), opacity=0.17, showlegend=False
-            ))
-
-            y_min = min(y_min, min([subouts[t]['faithfulness'] for t in thresholds]))
-            y_max = max(y_max, max([subouts[t]['faithfulness'] for t in thresholds]))
-
-            fig.add_trace(go.Scatter(
-                x=xs,
-                y=[ sum([f(x) for f in fs.values()]) / len(fs) for x in xs ],
-                mode='lines', line=dict(color=colors[setting]), name=setting
-            ))
-
-        fig.update_xaxes(type="log", range=[math.log10(x_min), math.log10(x_max)])
-        fig.update_yaxes(range=[y_min, min(y_max, 2)])
-
-        fig.update_layout(
-            xaxis_title='Nodes',
-            yaxis_title='Faithfulness',
-            width=800,
-            height=375,
-            # set white background color
-            plot_bgcolor='rgba(0,0,0,0)',
-            # add grey gridlines
-            yaxis=dict(gridcolor='rgb(200,200,200)',mirror=True,ticks='outside',showline=True),
-            xaxis=dict(gridcolor='rgb(200,200,200)', mirror=True, ticks='outside', showline=True),
-
-        )
-
-        # fig.show()
-        fig.write_image('faithfulness.pdf')
-
-    def plot_faithfulness(outs):
-        """
-        plot faithfulness results
-
-        Plot all w.r.t. thresholds, and plot line for complete and empty graphs
-
-        TODO : Plot edges w.r.t. nodes, and other plots if needed
-        """
-
-        thresholds = []
-        n_nodes = []
-        n_edges = []
-        avg_deg = []
-        density = []
-        # modularity = []
-        # z_score = []
-        faithfulness = [[] for _ in metric_fn_dict]
-        complete = []
-        empty = []
-
-        for t in outs:
-            if t == 'complete':
-                for i, fn_name in enumerate(metric_fn_dict):
-                    complete.append(outs[t][fn_name])
-                continue
-            if t == 'empty':
-                for i, fn_name in enumerate(metric_fn_dict):
-                    empty.append(outs[t][fn_name])
-                continue
-            thresholds.append(t)
-            n_nodes.append(outs[t]['n_nodes'])
-            n_edges.append(outs[t]['n_edges'])
-            avg_deg.append(outs[t]['avg_deg'])
-            density.append(outs[t]['density'])
-            # modularity.append(outs[t]['modularity'])
-            # z_score.append(outs[t]['z_score'])
-            for i, fn_name in enumerate(metric_fn_dict):
-                faithfulness[i].append(outs[t]['faithfulness'][fn_name])
-
-        fig = make_subplots(
-            rows=4 + len(list(metric_fn_dict.keys())),
-            cols=1,
-        )
-
-        for i, fn_name in enumerate(metric_fn_dict):
-            print(faithfulness[i])
-            fig.add_trace(go.Scatter(
-                    x=thresholds,
-                    y=faithfulness[i],
-                    mode='lines+markers',
-                    #title_text=fn_name+" faithfulness vs threshold",
-                    name=fn_name,
-                ),
-                row=i+1, col=1
-            )
-
-        fig.add_trace(
-            go.Scatter(
-                x=thresholds,
-                y=n_nodes,
-                mode='lines+markers',
-                #title_text="n_nodes vs threshold",
-                name='n_nodes',
-            ),
-            row=len(list(metric_fn_dict.keys()))+1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=thresholds,
-                y=n_edges,
-                mode='lines+markers',
-                #title_text="n_edges vs threshold",
-                name='n_edges',
-            ),
-            row=len(list(metric_fn_dict.keys()))+2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=thresholds,
-                y=avg_deg,
-                mode='lines+markers',
-                #title_text="avg_deg vs threshold",
-                name='avg_deg',
-            ),
-            row=len(list(metric_fn_dict.keys()))+3, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=thresholds,
-                y=density,
-                mode='lines+markers',
-                #title_text="density vs threshold",
-                name='density',
-            ),
-            row=len(list(metric_fn_dict.keys()))+4, col=1
-        )
-
-        # Update x-axes to log scale
-        fig.update_xaxes(type="log")
-
-        # default layout is : height=600, width=800. We want to make it a bit bigger so that each plot has the original size
-        fig.update_layout(
-            height=600 + 400 * (4 + len(list(metric_fn_dict.keys()))),
-            width=800,
-            title_text="Faithfulness and graph properties w.r.t. threshold",
-            showlegend=True,
-        )
-
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-        fig.write_html(save_path + "faithfulness.html")
-
-    ##########
-    # Main functions
-    ##########
 
     ##########
     # This function builds the computational graph.
@@ -457,7 +183,12 @@ def run_main(device_id, step_1, step_2):
         tot_circuit = None
         
         i = 0
-        max_loop = args.circuit_max_loop
+        if torch.cuda.is_available() and __name__ != "__main__":
+            # We are dividing number of batches across devices
+            n_devices = torch.cuda.device_count()
+        else:
+            n_devices = 1
+        max_loop = args.circuit_max_loop // n_devices
         edge_threshold = args.edge_threshold
         node_threshold = args.node_threshold
 
@@ -494,9 +225,9 @@ def run_main(device_id, step_1, step_2):
                 dump_all=dump_all,
                 save_path=save_path,
             )
-            merge_circuits(tot_circuit, circuit, aggregation=args.aggregation)
+            tot_circuit = merge_circuits(tot_circuit, circuit, aggregation=args.aggregation)
             
-            if i % 10 == 0:
+            if i % 10 == 0 or i == max_loop:
                 to_save = tot_circuit
                 if args.aggregation == "sum":
                     to_save = mean_circuit(tot_circuit, i)
@@ -581,7 +312,7 @@ def run_main(device_id, step_1, step_2):
             trg = batch["trg"]
             outs = {
                 'features' :
-                    marks_get_fcs(
+                    get_fcs(
                         pythia70m,
                         circuit,
                         tokens,
@@ -596,7 +327,7 @@ def run_main(device_id, step_1, step_2):
                         submod_names=submod_names,
                     ),
                 'features_wo_errs' :
-                    marks_get_fcs(
+                    get_fcs(
                         pythia70m,
                         circuit,
                         tokens,
@@ -609,7 +340,7 @@ def run_main(device_id, step_1, step_2):
                         handle_errors='remove'
                     ),
                 'features_wo_some_errs' :
-                    marks_get_fcs(
+                    get_fcs(
                         pythia70m,
                         circuit,
                         tokens,
@@ -653,10 +384,16 @@ def run_main(device_id, step_1, step_2):
     ##########
     def run_second_step():
         pythia70m, pythia70m_embed, pythia70m_resids, pythia70m_attns, pythia70m_mlps, submod_names = load_model_and_modules(DEVICE)
-        
+
         start_at_layer = esal
         submodules = [pythia70m_embed] if start_at_layer == -1 else []
-        for i in range(max(start_at_layer, 0), len(pythia70m.gpt_neox.layers)):
+
+        if hasattr(pythia70m, "gpt_neox"):
+            n_layers = len(pythia70m.gpt_neox.layers)
+        elif hasattr(pythia70m, "cfg"):
+            n_layers = pythia70m.cfg.n_layers
+
+        for i in range(max(start_at_layer, 0), n_layers):
             submodules.append(pythia70m_resids[i])
         
         dictionaries = load_saes(
@@ -694,7 +431,7 @@ def run_main(device_id, step_1, step_2):
                 corr_trg = batch["corr_trg"]
 
             thresholds = torch.logspace(-2, 2, 15, 10).tolist()
-            faithfulness = evaluation.faithfulness.faithfulness(
+            faithfulness = faithfulness_fn(
                 pythia70m,
                 submodules=submodules,
                 sae_dict=dictionaries,
@@ -725,7 +462,7 @@ def run_main(device_id, step_1, step_2):
             del faithfulness
             gc.collect()
             
-            plot_faithfulness(aggregated_outs)
+            plot_faithfulness(aggregated_outs, metric_fn_dict=metric_fn_dict, save_path=save_path)
 
         for t, out in aggregated_outs.items():
             if t == 'complete' or t == 'empty':
@@ -735,7 +472,7 @@ def run_main(device_id, step_1, step_2):
                 for fn_name in metric_fn_dict:
                     aggregated_outs[t]['faithfulness'][fn_name] /= i
 
-        plot_faithfulness(aggregated_outs)
+        plot_faithfulness(aggregated_outs, metric_fn_dict=metric_fn_dict, save_path=save_path)
 
     if step_1:
         print("\nRunning step 1 on device {}...\n".format(device_id))
@@ -770,7 +507,7 @@ if __name__ == "__main__":
         "eval_method": args.eval_method,
         "eval_metric": args.eval_metric,
         "eval_batch_size": args.eval_batch_size,
-        "eval_max_loop": args.eval_max,
+        "eval_max_loop": args.eval_max_loop,
         "eval_start_at_layer": args.eval_start_at_layer,
         "save_path": args.save_path,
         "circuit_path": args.circuit_path,

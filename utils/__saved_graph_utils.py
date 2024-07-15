@@ -47,7 +47,7 @@ def mean_circuit(circuit, n):
     return circuit
 
 @torch.no_grad()
-def get_mask(graph, threshold, threshold_on_nodes=False):
+def get_mask(graph, threshold):
     """
     graph :
     edges : dict of dict of sparse_coo tensors, [name_upstream][name_downstream] -> edge weights
@@ -56,7 +56,7 @@ def get_mask(graph, threshold, threshold_on_nodes=False):
     """
     has_nodes = False
     if isinstance(graph, tuple):
-        has_nodes = True and threshold_on_nodes
+        has_nodes = True
         nodes = graph[0]
         edges = graph[1]
     else:
@@ -68,7 +68,7 @@ def get_mask(graph, threshold, threshold_on_nodes=False):
     if has_nodes:
         node_mask = {}
         for module in nodes:
-            node_mask[module] = nodes[module].abs() > threshold
+            node_mask[module] = nodes[module].to_tensor().abs() > threshold
 
     edge_mask = {}
 
@@ -84,8 +84,8 @@ def get_mask(graph, threshold, threshold_on_nodes=False):
                 )
             else:
                 if has_nodes and downstream != 'y':                
-                    upstream_mask = node_mask[upstream].to_tensor()[weights.indices()[1]]
-                    downstream_mask = node_mask[downstream].to_tensor()[weights.indices()[0]]
+                    upstream_mask = node_mask[upstream][weights.indices()[1]]
+                    downstream_mask = node_mask[downstream][weights.indices()[0]]
                     mask = upstream_mask & downstream_mask
                 else:
                     mask = weights.values() > threshold
@@ -95,7 +95,7 @@ def get_mask(graph, threshold, threshold_on_nodes=False):
                     weights.size(),
                     dtype=torch.bool
                 )
-    return node_mask, edge_mask
+    return edge_mask
 
 @torch.no_grad()
 def to_Digraph(circuit, discard_res=False, discard_y=False):
@@ -366,7 +366,6 @@ def get_density(edges):
         for down in edges[up]:
             n_edges += edges[up][down].values().size(0)
             max_edges += edges[up][down].size(0) * (edges[up][down].size(1) if down != 'y' else 1)
-    max_edges = max(max_edges, 1)
     return n_edges / max_edges
 
 def get_degree_distribution(G):

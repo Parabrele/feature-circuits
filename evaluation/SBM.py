@@ -31,7 +31,7 @@ import networkx as nx
 from matplotlib import pyplot as plt
 import matplotlib
 
-from utils.graph_utils import to_Digraph
+from utils.graph_utils import to_graph
 
 def cov2corr(cov):
     """
@@ -55,7 +55,7 @@ def fit_nested_SBM(cov, already_correlation=False, threshold=None, sparsity_thre
     Fit a nested SBM on the complete graph with these weights.
     """
     if isinstance(cov, dict):
-        cov = to_Digraph(cov)
+        cov = to_graph(cov)
         
     state_args = dict(
         deg_corr=False,
@@ -90,8 +90,10 @@ def fit_nested_SBM(cov, already_correlation=False, threshold=None, sparsity_thre
         state_args['rec_types']=['real-normal']
 
     elif isinstance(cov, nx.Graph):
+        relabel_nodes = {node : i for i, node in enumerate(cov.nodes)}
+        renamed = nx.relabel_nodes(cov, relabel_nodes)
         g = gt.Graph(directed=False)
-        g.add_edge_list(cov.edges)
+        g.add_edge_list(renamed.edges)
     
     n_threads = gt.openmp_get_num_threads()
     with gt.openmp_context(n_threads):
@@ -106,6 +108,37 @@ def fit_nested_SBM(cov, already_correlation=False, threshold=None, sparsity_thre
     print("Summary :")
     state.print_summary()
     return state
+
+"""
+Script to test conversion from nx to gt graph :
+
+import networkx as nx
+import graph_tool.all as gt
+
+g = nx.Graph()
+g.add_edge("a", "b")
+g.add_edge("a", "c")
+g.add_edge("b", "c")
+g.add_edge("gertrude44du69", "cbastienxx")
+g.add_edge(45, 695)
+g.add_edge(45, "gertrude44du69")
+
+g_gt = gt.Graph(directed=False)
+g_gt.add_edge_list(g.edges)
+print(g_gt.get_vertices())
+print(g_gt.get_edges())
+print(g_gt)
+
+This does not work, we need to convert the nodes to integers first.
+
+rename_nodes = {node : i for i, node in enumerate(g.nodes)}
+renamed_g = nx.relabel_nodes(g, rename_nodes)
+g_gt = gt.Graph(directed=False)
+g_gt.add_edge_list(renamed_g.edges)
+print(g_gt.get_vertices())
+print(g_gt.get_edges())
+print(g_gt)
+"""
 
 def plot_hierarchy(state, save_path=None):
     """

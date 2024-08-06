@@ -10,12 +10,13 @@ from transformers import AutoTokenizer
 def parse_args():
     parser = argparse.ArgumentParser()
     
-    parser.add_argument("--names", "-n", default="data/helper_files/names.json")
-    parser.add_argument("--templates", "-t", default="data/helper_files/templates-gp.json")
+    parser.add_argument("--names", "-n", default="/home/pyllm/dhimoila/feature-circuits-1/data/helper_files/names.json")
+    parser.add_argument("--templates", "-t", default="/home/pyllm/dhimoila/feature-circuits-1/data/helper_files/templates-gp.json")
     parser.add_argument("--train", "-tr", default=150, type=int)
     parser.add_argument("--validation", "-va", default=150, type=int)
-    parser.add_argument("--test", "-tt", default=3000, type=int)
-    parser.add_argument("--out-path", "-o", default="data/datasets/gp")
+    parser.add_argument("--test", "-tt", default=1800, type=int)
+    parser.add_argument("--out-path", "-o", default="/home/pyllm/dhimoila/feature-circuits-1/data/datasets/gp")
+    parser.add_argument("--tokenizer", default="gpt2")
     parser.add_argument("--enforce-single-token", "-e", action="store_true")
     parser.add_argument("--split-by-template", "-b", action="store_true")
     parser.add_argument("--seed", "-s", type=int, default=42)
@@ -33,7 +34,7 @@ def is_single_token(tokenizer, token):
 def main():
     args = parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 
     names = json.load(open(args.names))
     girls = names["girls"]
@@ -154,7 +155,11 @@ def main():
         k: Dataset.from_list(v) for k, v in processed.items()
     })
 
-    dataset.save_to_disk(args.out_path)
+    for k, d in processed.items():
+        if len(d) == 0:
+            print(f"Warning: {k} is empty")
+
+    processed.save_to_disk(args.out_path)
 
 if __name__ == '__main__':
     main()

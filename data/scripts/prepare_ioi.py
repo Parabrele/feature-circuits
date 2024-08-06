@@ -9,10 +9,15 @@ import numpy as np
 from datasets import load_dataset, DatasetDict, Dataset
 from transformers import AutoTokenizer
 
+def select_single_token_names(names, tokenizer):
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+    
+    return [name for name in names if len(tokenizer.encode(name)) == 1]
+
 def parse_args():
     parser = argparse.ArgumentParser()
     
-    parser.add_argument("--out-dir", "-o", default="data/datasets/ioi")
+    parser.add_argument("--out-dir", "-o", default="/home/pyllm/dhimoila/feature-circuits-1/data/datasets/ioi")
     parser.add_argument("--seed", "-s", type=int, default=42)
     parser.add_argument("--start-size", "-n", type=int, default=300000) # Trim the dataset early to save time
     parser.add_argument("--num_test_templates", "-nt", type=int, default=4) # Number of held-out templates
@@ -20,13 +25,15 @@ def parse_args():
     parser.add_argument("--validation", "-v", type=int, default=200)
     parser.add_argument("--test", "-e", type=int, default=10000)
     parser.add_argument("--tokenizer", "-tk", default="gpt2")
-    parser.add_argument("--names", "-nm", default="data/helper_files/names.json")
+    parser.add_argument("--names", "-nm", default="/home/pyllm/dhimoila/feature-circuits-1/data/helper_files/names.json")
     
     args = parser.parse_args()
     
     args.names = json.load(open(args.names))
     if "girls" in args.names:
         args.names = args.names["boys"] + args.names["girls"]
+
+    args.names = select_single_token_names(args.names, args.tokenizer)
     
     return args
 
@@ -137,7 +144,9 @@ def main():
     
     val_templates = random.sample(baba_templates, n_baba) + random.sample(abba_templates, n_abba)
     
+    print("Waiting for data to load...")
     data = load_dataset('fahamu/ioi')['train']
+    print("Data loaded")
     if args.start_size < len(data):
         data = data.select(range(args.start_size))
     data = data.map(add_template, num_proc=32)

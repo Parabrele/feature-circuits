@@ -141,7 +141,7 @@ def bool_buffer(
         ctx_len,
         split='train',
 ):
-    bool_data = load_from_disk(boolean_expressions_path)[split]
+    bool_data = load_from_disk(boolean_expressions_path)[split].shuffle()
     bool_iter = custom_iter(iter(bool_data), text_field=['input', 'target'])
 
     print("Bool num rows", bool_data.num_rows)
@@ -164,8 +164,8 @@ def gp_buffer(
         ctx_len,
         split='train',
 ):
-    gp_data = load_from_disk(gp_path)[split]
-    gp_iter = custom_iter(iter(gp_data), text_field=['prefix', 'pronoun'], corr_field=['corr_prefix', 'corr_pronoun'])
+    gp_data = load_from_disk(gp_path)[split].shuffle()
+    gp_iter = custom_iter(iter(gp_data), text_field=['prefix', 'pronoun'])#, corr_field=['corr_prefix', 'corr_pronoun'])
 
     print("GP num rows", gp_data.num_rows)
 
@@ -176,7 +176,7 @@ def gp_buffer(
         batch_size=batch_size,
         device=device,
         max_number_of_yields=gp_data.num_rows,
-        corr_field='corr',
+        #corr_field='corr',
     )
 
     return buffer
@@ -188,8 +188,8 @@ def gt_buffer(
         ctx_len,
         split='train',
 ):
-    gt_data = load_from_disk(gt_path)[split]
-    gt_iter = custom_iter(iter(gt_data), text_field='prefix', corr_field='corr_prefix')
+    gt_data = load_from_disk(gt_path)[split].shuffle()
+    gt_iter = custom_iter(iter(gt_data), text_field='prefix')#, corr_field='corr_prefix')
 
     print("GT num rows", gt_data.num_rows)
 
@@ -200,7 +200,7 @@ def gt_buffer(
         batch_size=batch_size,
         device=device,
         max_number_of_yields=gt_data.num_rows,
-        corr_field='corr',
+        #corr_field='corr',
     )
     
     return buffer
@@ -212,8 +212,8 @@ def ioi_buffer(
         ctx_len,
         split='train',
 ):
-    ioi_data = load_from_disk(ioi_path)[split]
-    ioi_iter = custom_iter(iter(ioi_data), text_field='ioi_sentences', corr_field='corr_ioi_sentences')
+    ioi_data = load_from_disk(ioi_path)[split].shuffle()
+    ioi_iter = custom_iter(iter(ioi_data), text_field='ioi_sentences')#, corr_field='corr_ioi_sentences')
 
     print("IOI num rows", ioi_data.num_rows)
 
@@ -224,7 +224,7 @@ def ioi_buffer(
         batch_size=batch_size,
         device=device,
         max_number_of_yields=ioi_data.num_rows,
-        corr_field='corr',
+        #corr_field='corr',
     )
     
     return buffer
@@ -236,12 +236,12 @@ def mixture_buffer(
         ctx_len,
         split='train',
 ):
-    gp_data = load_from_disk(gp_path)[split]
-    gp_iter = custom_iter(iter(gp_data), text_field=['prefix', 'pronoun'], corr_field=['corr_prefix', 'corr_pronoun'])
-    gt_data = load_from_disk(gt_path)[split]
-    gt_iter = custom_iter(iter(gt_data), text_field='prefix', corr_field='corr_prefix')
-    ioi_data = load_from_disk(ioi_path)[split]
-    ioi_iter = custom_iter(iter(ioi_data), text_field='ioi_sentences', corr_field='corr_ioi_sentences')
+    gp_data = load_from_disk(gp_path)[split].shuffle()
+    gp_iter = custom_iter(iter(gp_data), text_field=['prefix', 'pronoun'])#, corr_field=['corr_prefix', 'corr_pronoun'])
+    gt_data = load_from_disk(gt_path)[split].shuffle()
+    gt_iter = custom_iter(iter(gt_data), text_field='prefix')#, corr_field='corr_prefix')
+    ioi_data = load_from_disk(ioi_path)[split].shuffle()
+    ioi_iter = custom_iter(iter(ioi_data), text_field='ioi_sentences')#, corr_field='corr_ioi_sentences')
 
     class random_iter:
         def __init__(self, datasets):
@@ -260,7 +260,7 @@ def mixture_buffer(
         batch_size=batch_size,
         device=device,
         max_number_of_yields=min(gp_data.num_rows, gt_data.num_rows, ioi_data.num_rows) * 3,
-        corr_field='corr',
+        #corr_field='corr',
     )
 
     return buffer

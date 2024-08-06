@@ -11,110 +11,31 @@
 
 % DELETE flags indicate parts of the text that can be deleted if there is not enough space.
 
-\title{Interpreting Transformer Models as Computational Graphs}
-\author{}
-\date{}
+\title{Title}
+\author{author}
+\date{date}
 \maketitle
 
 % Make the abstract
 
+\newpage
 \begin{abstract}
-We explore ways to abstract transformer models as interpretable computational graphs, and propose ways to evaluate the quality of these graphs. We further propose new ways for automating interpetability, relying heavily on these graphs. We show that..
+TODO : write the abstract
 \end{abstract}
 
+\newpage
+\tableofcontents
+
+\newpage
 \section{Introduction}
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% Neuroscience thesis excerpts :
-%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-% TODO : say that most of the currently
-% used clustering methods in neural networks are based on the assumption that
-% the cluster structure is modular, that is, the nodes are densely connected within
-% clusters, but sparsely connected between clusters
-% Compare these classical clustering methods with SBMs and show that SBMs capture more functionally relevant communities in neural networks, as it has been done in neuroscience [cite thesis].
-% Use marks et al circuit discovery as comparison
-
-% Functional segregation : each part specialises in various functions
-
-% In general, classical neuroscience describes the human brain as an organ
-% whose many parts specialise in various functions by actively engaging in local processes. In the conventional sense, such a view of the brain’s infrastructure is known
-%as ‘functional segregation’.
-
-% This doesn't seem to work well (e.g. vision & co) : 
-
-% However, although this approach has proved to be a successful theoretical framework for describing regional functions of the human brain, it has been shown to be inadequate
-% for explaining higher cognitive processes like visual recognition, social cognition,
-% emotions or others (see, e.g., Van Den Heuvel and Sporns, 2013, for a review). Indeed, such cognitive processes are not necessarily linked to a single anatomical brain
-% region, but typically to several brain regions, demonstrating that the brain, for these
-% functions, actively engages in processes at multiple spatial locations (Tononi et al.,
-% 1998)
-
-% Thus, in order to study such large scale aspects of the brain’s functional
-% organisation, modern neuroscience has adopted a view of ‘functional integration’,
-% in which the brain is defined as a complex network of neuronal elements (nodes)
-% whose connections (edges) facilitate di↵erent functional processes. This alternative
-% view of the brain helps to represent two important functional aspects of the brain.
-% First, long distance connections between di↵erent brain regions facilitate complex
-% functions. Second, some of these brain regions and their circuits may be involved
-% in several functions and, thus, act as important focal points in the brain. These
-% two aspects clearly demonstrate the advantage of functional integration compared
-% to functional segregation and explain the growing interest of representing the brain
-% as a network.
-
-
-% connectivity can be distinguished along three major classes, referred to as
-% structural, functional and e↵ective connectivity.
-%   -> weight based / activation / attribution ?
-%   -> functional : temporal correlations : correlation matrix of activations / attributions
-%   -> effective : causal relationships : graph of dependencies
-
-% TODO : say that they all have been marginally rediscovered in MI community without references to neuroscience equivalent. We believe that both MI and neuroscience can benefit from closer collaborations, MI to get initial insight on which directions might or might not work and an initial body of work to build upon, and neuroscience to get easier experiments validating potential experiments or frameworks of network science and analysis.
-
-
-% Brain use "either a framework of task or resting state studies"
-% Maybe going straight to wikipedia is too optimistic and first focus on tasks (jointly and/or separataly)
-
-% This all seems pretty much what MI community is rediscovering for neural networks : each part of the model is hard to interpret (heads, neurons and even features, with only cherry picked examples being interpretable) and "circuit" discovery methods discovering functionally relevant subgraphs.
-
-
-% Goal of this research : are SBMs a good way to represent neural networks, in the sense that they retrieve functionally important communities
-
-% TODO : head level activations and cov. To reduce the number of nodes. This assumes that heads are the right unit for functional nodes.
-%        This can be similar to aggregating fMRI voxels into regions of interest (ROIs) in neuroscience.
-
-% TODO : transform pearson corelation using fisher transformation to get a normal distribution. Zs can then be used to build a weighted graph, or binarized based on significant (1) or non-significant (0) tests at each edge. Significance can be determined using a threshold on the p-value or on the Zs. Thresholding has been studied in neuro :
-
-% When constructing binary connection matrices, one of the most important
-% decisions to make is how to set the critical significance threshold. In the literature,
-% it is common to set this threshold in a data-dependent fashion and select a value
-% that produces a given proportion (e.g., 10%) of significant edges (e.g., Mørup et al.,
-% 2010; Zalesky et al., 2012; Van Wijk et al., 2010; Ginestet et al., 2011). Alternatively,
-% a multiple comparisons based threshold can usually be obtained by using either a
-% Bonferroni (e.g., Cao et al., 2014) or an False Discovery Rate method (e.g., Achard
-% et al., 2006).
-
-% Force self loops to 0 (by setting correlation diagonal to 0) ?
-
-% Do it all on toy models first, then on real models. (othelo, mnist, MLPs, ...)
-
-
-% Tasks for LLMs : IOI, GT, subject verb agreement, Subject classification, QA, Truth, Sentiment classification.
-
-% Get inspiration from pavlovic sec 2.4 for background on SBM
-
-% Restart Louvain, spectral and SBM, plot hist of modularity, color by number of communities.
-
-% Furthermore, the ‘cores-in-modules’ fit topologically captured both aspects of brain’s functional
-% hierarchy, as the modular part reflects functional segregation, while the densely
-% connected core clearly reflects functional integration
-
-% fig 5.9 : do the same : correspondance between SBM blocks and louvain communities
-
-% fig 3.6 5.10 : plot collapsed blocks graph and matrix of probabilities
-
-
-% NEXT TODO :
+%%%%%%%%%%
+% NEXT TODO (not up to date) :
+%   - define ROIs as functionally similar features in a single layer (residual or attn/mlp layer (no more attn head level)) and build a graph on these ROIs.
+%   - on n small tasks, compare overlap of nodes between these tasks, do it per layer. 
+%   - I then essentially have a "ground truth" separation of nodes, is the SBM able to find it ? Even if we restrict ourselves to maybe later layers ?
+%   - USE TOY MODELS !
+%   - the vision paper used corr on a single layer. Do the same. Maybe this is better. It allows for trivial corr in any feature space.
 %   (future) - define structural connectivity an run experiments for it
 %   - run functional connectivity experiments on more examples (let it run a day or 2) residual and not residual
 %       - as brains have to be energy efficient, it is safe to assume that activation and attribution are the same.
@@ -131,55 +52,80 @@ We explore ways to abstract transformer models as interpretable computational gr
 %       - interpret blocks
 %
 % (future) do it across model sizes and across training steps, to see the emergence of these structures, and if there are similarities between model sizes.
+%%%%%%%%%%
 
-% In background section, largely inspire from https://arxiv.org/pdf/1705.10225 : we want to avoid the pitfall of overfitting statistical fluctuations in the data by finding blocks that do not account for statistically significant structure in the data that can't be explained by random fluctuations.). We also want to avoid underfitting : nested SBM. In the same way we chose P(b) to be an uninformative prior by accounting for uniform distributions of B and block sizes, we also want to account for biases in lambda : quadratic penalty on B as e is a B x B matrix : we can view it as an SBM ! This way we have a better prior distribution for e. To be able to efficiently find b that maximises P(b|A), we can use a markov chain monte carlo with arbitrary b_0 and with equilibrium distribution being optimal.
+%%%%%%%%%%
+%%%%%
+% SBM Plots & experiments :
+%%%%%
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% TODO : compare SBMs and community detections algorithms and show that they discover more functionally relevant structures in neural networks.
 
-% (for internship report : ) SAEs are just one direction in trying to find better geometric representations of models. Most obvious : SVD/whitened space, more complex : LIB space, feature space, for any dictionary one can think of. Finding specific directions / features as well as studying interventions are very related fields when studying the geometry of latent space. 
+% Restart Louvain, spectral and SBM, plot hist of modularity, color by number of communities.
 
-% TOSAY : sleeper agent & ensuring only "training" behaviors are present even in "evaluation" : sleeper agents might be different nodes / communities / links in the graph that we didn't get in training, so by enforcing the graph we have, these sleeper agents are now kept asleep. Also, if some nodes/communities are labeled as harmful, we can prune them
+% fig 5.9 : do the same : correspondance between SBM blocks and louvain communities
 
-% TOSAY : models are a really big function and we try to express it as a composition of simpler functions by building the graph of dependencies between these simpler functions to enhance interpretability.
+% fig 3.6 5.10 : plot collapsed blocks graph and matrix of probabilities
+%%%%%%%%%%
 
-% (probably forget that) TOSAY : say somewhere that head graph is interesting as in neuroscience, networks are generally build between big regions of the brain, never between individual neurons, so there might be a parallel as heads and MLPs are "big regions". Whether this parallel fails or not is an interesting question (by "fail" we mean that a head based computational graph might be too entangled to be able to extract any useful information from it).
+The field of mechanistic interpretability (MI) aims at explaining the inner workings of a neural network. This is usually done either by attributing some function or behavior to a specific computational entity \citep{TODO:probing,vision_clusters,layerjesaisplusquoi-alexandre}, or by attributing it to a subgraph of the computational graph \citep{TODO:circuit_discovery}. We see in section \ref{sec:parallels} that both of these approaches have their equivalent in the field of neurosciences.
 
-The goal of MI is to reverse engineer the inner workings of a model.
-A ton of work has been done in the last few years in trying to find subgraphs of the computational graph responsible for some selected task or behavior, everyone is fighting over who will get the best graph discovery algorithm.
+Recent work in MI aims at finding computational subgraphs responsible for some selected task or behavior \citep(TODO), often simply trying out new ideas with lack of common frameworks or definitions to clearly state the fundamental differences between all these studies \small{\textit{they don't even mention it, they just say "oh look at our new method, in our circuits we find THREE heads in common with this other method ! We are glad to not provide any comment on the superficial let alone fundamental differences between these methods and why the heck we even tried a new one !}}. We believe that settling on unified definitions and frameworks can allow researchers to have a clearer global view of the field, of the work that has already been done and the directions we might want to explore.
 
-We want to go to the next step, so no more task specific subgraph discovery, but describing the whole computational graph and what can be learned from it. What TODO FUTURE WORK ? : we hope to do, or future work to do, is to find functionally relevant subgraphs in an unsuperised way as communities of these computational graphs. %`FUTURE` TODO (labeling : probably foget, matching and training : only if we have time and do the experiment. Otherwise, keep for further paper, but mention it in the internship report.), as well as being able to label nodes with simple functions, still in an unsupervised way. We further want to compare graphs of models of the same and increasing size to look for reocurring patterns which would correspond to matching communities. We also want to study the emergence of these structures across training, and how they evolve across time.
+We are interested in defining computational graphs of neural networks as the study of their structure could lead to new insight in the inner working of these models. It can lead to new ways of thinking about the alignment problem through interventions on these graphs. Studying the similarities between the inner working of different models, across parameter sizes or across training steps, could also lead to new insights on the evolution and generality of behaviors in these models, although this is left for future work.
 
+This work is organised as follows. In section \ref{sec:meta}, we give general comments on the internship. In section \ref{sec:background}, we give some background on notions from neurosciences (section \ref{sec:brain_networks}), network sciences (section \ref{sec:SBM}) and mechanistic interpretability (section \ref{sec:attribution}, \ref{sec:SAE}, \ref{sec:circuit_discovery}). These notions are the basics upon which we build our work and contributions. In section \ref{sec:parallel}, we draw parallels between the way neurosciences and mechanistic interpretability explain complex systems through the analysis of underlying networks or structures. Following sections contain our contributions.
 
-Some work already exist on this and try to find communities of nodes in MLP and CNNs \citep{lu2019checking, filan2021clusterability}, and to some extend in transformers (LIB) with mitigated success in toy models and none on language models. %TODO ref riggs has some primary results on labeling nodes with simple functions, where he labels nodes as linear functions of their predecessors.
-
-We want to disantangle the model, from a coarse grain dense computational graph extremely efficient in terms of computation performances, to more fine grained computational graph, slower but more useful representations. %We compare different representations with various granularity in the experiment section.
-
-We will largely build upon the dictionary learning literature (Marks anthropic logan etc SAEs, gated SAE, sparse attribution SAE (with sparsity penalty on gradient)) and our methods are largely independent of the chosen dictionary learning method so long as it has a derivable encoding and decoding functions, any can be used to build and study the computational graph using our method. In particular, our method also works for changes of basis (ID, SVD, LIB, or any further proposed basis).%TODO : do not specifically describe MLP dictionaries, just speak of encoder and decoder as arbitrary functions depending on your prefered dictionary learning method, and say that for our experiments we use MLP dictionaries.
-
-TODO : main contribution & structure of the paper & what we will show in the experiments & ... .
-
-The rest of the introduction will be completed later.
-
-% Hope is that
-% - since fine grained & (hopefully) sparse, nodes correspond to easier functions (so provided that sparse dict is good, not only does it correspond to an atomic feature, it also describes it as an easy/atomic function of previous features) whereas more coarse grain graphs have no hope of describing the function associated to some node, except on very specific tasks with human labeling.
-%     - e.g. computational graph based on heads are just complete graphs - basically the original architecture - since everything is so interconected. The reason why models are black boxes is because their immediate graph of computation based purely on their architecture is really not that informative and doesn't allow for simple description of atomic functions implemented by the model or their dependencies. By having a more fine grained graph of computation hopefully we can automatically find simple functions corresponding to each node from which the global, very complicated function emerges.
-% - communities of nodes correspond to behaviors & conversely
-% - subgraphs / communities are shared between models of the same size / of increasing size.
-%     - it would give some indication that some learned behavior is optimal and having a bigger model only allows for new behaviors, but the one already present in smaller models are robust enough.
-% - graphs of computation are fractionally isomorphic
-% - even if both above points hold, two isomorphic subgraph based only on dependencies might implement very different functions, so labeling nodes might be important, and checking that matching communities actually correspond to the same behavior is important (so their nodes activate on the same examples, they are correlated). Conversely, check that subgraphs of correlated communities in two models are close.
-%     - match communities based on graph structure vs based on behavior / activation patterns
-% - when doing the activation matrix thing, do it jointly on two different models and see how close these communities are.
+\paragraph{contribution} We use concepts from both neurosciences and MI to propose new ways of automating interpretability in neural networks.
+% TODO : remove itemize when all done.
+\begin{itemize}
+    \item[Mostly Done] We define new low granularity nodes for neural networks study as groups of functionally linked fine grained nodes\footnote{Fine graine nodes can be anything from canonical dimentions - also known as neurons - to sparse features through any change of basis fitted to the model internal geomerty.} (section \ref{sec:TODO}) as defined by Stochastic Blockmodels (section \ref{sec:SBM}). We call these regions of interest (ROIs).
+    \item[TODO] We establish the relevance of these ROIs through interventions and predictable behavioral changes in the model (section \ref{sec:TODO}).
+    \item[TODO] We show that these ROIs are more functionally relevant than attention heads (section \ref{sec:TODO}), often used in the literature as low granularity nodes, as well as what would be given by community detection algorithms commonly used in the literature (see for example \citet{lu2019checking, filan2021clusterability, bushnaq2024using}) in section \ref{sec:TODO}.
+    \item[Done] We define a novel algorithm to get computational graphs in neural networks that can incorporate several levels of abstraction (section \ref{sec:TODO}) along ways to study such graphs (section \ref{sec:TODO}).
+    \item[TODO] We establish the superiority of Stochastic Blockmodels over more traditional community detection algorithms in studying the structure of these graphs \ref{sec:TODO}.
+    \item[Done but can do better] We show the relevance of these methods by demonstrating the functional equivalence between the original model and the one induced by our computational graph (section \ref{sec:TODO}), as well as intervening on this graph with predictable effects on the resulting model's behavior (section \ref{sec:TODO}).
+    \item[TODO future work] We show that restraining a model to it's elicited computational graph can naturally remove sleeper agents without intervention and that interventions on this graph can further remove unwanted behaviors (section \ref{sec:TODO}).
+\end{itemize}
 
 % Since we need a fine grained graph we will chose to build it from sparse dictionaries in a similar way to Marks although with some differences. We propose very general algorithm to build computational graphs.
 
+% For the internship report, 1 page for the abstract, one page for the table of contents, 
+% For the internship report, make a section explaining how the internship went.
+\section{Meta Information}
+\label{sec:meta}
+
+TODO : fill this section
+
+This section contains meta informations about my internship.
+
+\subsection{Supervision and environment}
+
+supervisor very present, discussions on a daily basis, very helpful and supportive. Organised many meetings with other teams to allow me to present my work, get feedback and find potentially relevant collaborations
+
+team very welcoming and open to discussions
+
+\subsection{Events}
+
+hikes, seminars, meetings both with the team and with other teams to present our works, find new ideas and potential collaborations.
+
+HAAISS summer school, ICML conference
+
+\subsection{Timeline}
+
+1st month : in depth discovery of the field of MI, exploration of several potentially interesting directions
+
+2nd month : focus on one direction : use attribution methods on feature edges to get the graph of dependencies
+
+3rd month : nothing works :c (well, some things work but I'm not satisfied)
+
+4th month : Not finished. Discovery of the SBM literature, new directions. %Meetings with neuroscientists ?
+
+5th month : Soon. (maybe too soon...)
+
 \section{Background}
 
-% TODO : neuroscience & network science section
-
-% TODO : SBM section
-
-% TODO : rewrite other sections to include neuroscience comments.
+This section gives some background on notions from neurosciences (section \ref{sec:brain_networks}), network sciences (section \ref{sec:SBM}) and mechanistic interpretability (section \ref{sec:attribution}, \ref{sec:SAE}, \ref{sec:circuit_discovery}). These notions are the fundations upon which we build our work.
 
 \subsection{Notations}
 
@@ -187,31 +133,58 @@ We will denote by $\mathcal{M}$ a transformer model, and by $m$ its \textit{modu
 
 The output of module $m$ when given input $x$ will be denoted by $x^m$.
 
-Scalar functions depending on the evaluation of $x$ by $\mathcal{M}$ will be denoted by $\lambda(\mathcal{M}, x)$. It can be a metric function on the output of the model, or any scalar function depending on the internal activations of the model.
+Scalar functions depending on the evaluation of $x$ by $\mathcal{M}$ will be denoted by $\lambda(\mathcal{M}, x)$. It can be a metric function on the output of the model, or any scalar function depending on its internal activations.
 
-In section \ref{sec:SAE}, we introduce $d_{dict}$ the size of a dictionary, as well as $b_i$ and $\alpha_i$ - respectively the features of a dictionary and their activation - or magnitude - for some input. We will often identify these two concepts under the notation $f_i$ or simply $f$, for feature.
+In section \ref{sec:SAE}, we introduce $d_{dict}$ the size of a dictionary, as well as $b_i$ and $\alpha_i$, respectively the feature vectors of a dictionary and their activation~-~or magnitude~-~for some input. We will often identify these two concepts under the notation $f_i$ or simply $f$, for feature.
+
+\subsection{Brain Networks}
+\label{sec:brain_networks}
+
+For decades now, the field of neurosciences has been trying to understand the brain by explaining the function of each of its parts [TODO : ref]. There are two main paradigm when trying to explain the function of the brain : \textit{functional segregation} and \textit{functional integration} of brain regions [TODO : ref]. The former, which historically appeared first, assumes that the brain is divided into many parts, each specialising in various functions by engaging in local processes, while the latter assumes that the brain is a complex network of neuronal elements whose connections facilitate different functional processes. \textit{Functional integration} has been shown to be more successful in explaining higher cognitive processes like visual recognition, social cognition, emotions or others [TODO : ref].%(see, e.g., Van Den Heuvel and Sporns, 2013, for a review)
+
+When it comes to building a brain network, three major classes of connectivity can be distinguished : \textit{structural}, \textit{functional} and \textit{effective} connectivity [TODO : ref]. Structural connectivity refers to the anatomical connections between brain regions. Functional connectivity measures temporal correlations between the activation of brain regions, the idea being that regions that share the same function, or work together in the emergence a more complex ones should be active at the same time. Effective connectivity measures causal relationships between brain regions through actual information flow.
+
+\subsection{Block Models}
+\label{sec:SBM}
+
+TODO : this section is too ugly, there are just a few big blocks of text ! Make it more readable ! Maybe illustrations will help.
+
+% TODO : maybe pavlovic has some good references for SBM other than peixoto
+
+Block Models [TODO : ref] are a class of generative models for graphs. They assume that the nodes of a graph are divided into $B$ blocks, and that the probability $P_{b_i, b_j}$ of an edge between two nodes $i$ and $j$ depends only on the blocks they belong to - $b_i$ and $b_j$ respectively. The adjacency matrix $A$ is then generated by sampling each entry $A_{ij}$ from a Bernoulli distribution with parameter $P_{b_i, b_j}$.
+
+This is a generalisation in blocks of the Erdos-Renyi model [TODO : ref], which corresponds to the case where $B = 1$. It can model a large variety of graph structures, some of which are presented in figure \ref{fig:SBM_structures}.
+
+One can either use this framework to generate random graphs with a given structure, or to infer the underlying structure of a given graph. In the latter case, the goal is to find the block structure that maximises the likelihood of the observed graph. We will focus on the latter and fit Stochastic Block Models (SBMs) [TODO : ref] to a given graph - in our case, it will be the computational graph of a neural network.
+
+Community detection algorithms are commonly used in the fields of neurosciences [TODO : ref] and mechanistic interpretability [TODO : ref] to try to find the underlying structure of computational graphs and hopefully explain some mechanisms of the overall function of the model. However, these algorithms assume that nodes are arranged in communities - where nodes are densely connected within communities, but sparsely between communities - which restricts to possibilities on the discovered structures. Moreover, they are often prone to overfitting, where community structure is discovered even though it is merely an artefact of random fluctuations [TODO : ref] - see figure \ref{fig:CommunityOvFitting}.
+
+SBMs allows to relax these assumptions and find more general structures. Through the choice of clever prior distributions in bayesian models [TODO : ref], they allow to avoid the pitfall of underfitting as well as overfitting statistical fluctuations in the data by finding blocks that do not account for statistically significant structure in the data that can't be explained by random fluctuations. Underfitting is mainly avoided through recursive block models to get the likelihood of some choice for the probabilities between blocks, which also enables the discovery of nested structures in the data. Efficient inference algorithms arise from the choice of these priors and bayesian framework, using Markov Chain Monte Carlo methods to find the block structure that maximises the likelihood of the observed graph.
+
+SBMs were succesfully used in neurosciences [TODO : ref] to identify established brain structures and advance the field as a whole. They were able to identify both functional segregation in modular parts of the network and functional integration in densely connected cores.
 
 \subsection{Attribution and explanations}
+\label{sec:attribution}
 
-In this section, we discuss  classical attribution methods in neural networks. Attribution is the process of explaining a model's prediction by attributing it to some part of the input or intermediate feature. This is a very active field of research, and many methods have been proposed.
+In this section, we discuss classical attribution methods in neural networks. Attribution is the process of explaining a model's prediction by attributing it to some part of the input or intermediate feature. This is a very active field of research, and many methods have been proposed.
 
-We begin with the most basic and popular methods. \citet{springenberg2015strivingGuidedBackprop} used gradient in vision models to highligh which pixels of an image best explain some prediction. Let $\lambda : x \in \R^{d_{model}} \mapsto \lambda(x) \in \R$ be a scalar function and $x \in \R^{d_{model}}$ an input image of size $d_{model}$.
+We begin with the most basic and popular methods. \citet{springenberg2015strivingGuidedBackprop} used gradient in vision models to highligh which pixels of an image best explain some prediction. Let $\lambda : x \in \R^{d_{model}} \mapsto \lambda(x) \in \R$ be a scalar function on the model's computations - say the output value for a given class in a classifier - and $x \in \R^{d_{model}}$ an input image of size $d_{model}$.
 
 $$ Attr(x_i) = \frac{\partial \lambda(x)}{\partial x_i} $$
 
-They show that even though results are satisfactory, the explanation is really noisy and not precise. They introduce guided backprop, a variant that removes negative gradients in $ReLU$ layers in the backward gradient computation, which seems to improve the quality of the explanation.
+They show that even though results are satisfactory, the explanation is really noisy and imprecise. They introduce guided backprop, a variant that removes negative gradients in $ReLU$ layers in the backward gradient computation, which seems to improve the quality of the explanation.
 % DELETE
 Thus, the attribution when passing through a $ReLU$ layer is not
 $$ Attr^l = (x^l > 0) \cdot Attr^{l+1} $$
 which would be the gradient, but
 $$ Attr^l = (x^l > 0) \cdot (Attr^{l+1} > 0) \cdot Attr^{l+1} $$
-which is the masked gradient, kept only when positive. $x^l$ is the activation of the layer $l$, $Attr^l$ is the attribution of the layer $l$, and $Attr^{l+1}$ is the attribution of the layer $l+1$. For non $ReLU$ layers, the attribution is simply the gradient.
+which is the masked gradient, kept only when positive. $x^l$ and $Attr^l$ are respectively the activation and attribution of the layer $l$. For non $ReLU$ layers, the attribution is simply the gradient.
 
 Later on, \citet{zhou2016CAM} and \citet{selvaraju2017GradCAM} introduced CAM, GradCAM and guided GradCAM, methods that build upon these results to refine the attribution of the model's prediction to the input specifically for convolutional layers. Another noteworthy method for attribution is Layer-Wise Relevance Propagation \citep{montavon2019layerLRP}. Methods purely based on gradients most notably suffer from the fact that the model is not a linear function and that we don't know which directions pointed by the gradient are relevant - unless there is some sense of counterfactual input, as in \citep{syed2023attributionAtP}.
 
 Building upon this work, \citet{sundararajan2017axiomaticIG} introduced Integrated Gradients along with a set of axioms desirable for an attribution method. This method can be formalised in a general manner as follows. Let $\lambda : x \in \R^{d_{model}} \mapsto \lambda(x) \in \R$ be a scalar function, $x_{clean} \in \R^{d_{model}}$ an input, $x_{baseline} \in \R^{d_{model}}$ a baseline input. Let also $\gamma : [0, 1] \rightarrow \R^{d_{model}}$ be a path function between $x_{baseline}$ and $x_{clean}$. They define the attribution function as follows :
 
-$$ Attr_{\gamma}(x) = \int_{0}^{1} \frac{\partial \lambda(\gamma(t))}{\partial \gamma_i(t)} \cdot \frac{\partial \gamma_i(t)}{\partial t} dt $$
+$$ Attr_{\gamma}(x_i) = \int_{0}^{1} \frac{\partial \lambda(\gamma(t))}{\partial \gamma_i(t)} \cdot \frac{\partial \gamma_i(t)}{\partial t} dt $$
 
 The main idea is that since the model is not linear, the gradient alone is not enough to explain the model's prediction - adressing the first issue of the methods mentioned earlier. E.g. if some very important feature happens to be on a plateau, it will not be picked up by the gradient.%TODO Evidence of this sort of thing happening is found in \citep{TODO}.
     
@@ -226,39 +199,72 @@ In the circuit discovery literature \citep{olah2020zoomCircuits}, people got int
 
 \paragraph{Sparse coding} This motivates the use of dictionary learning and sparse coding methods to find overcomplete bases able to sparsely represent the data at any point in the model. Formally, we want a familly $\{b_i \in \R^{d_{model}}\}_{i=0}^{d_{dict}}$ such that, for all activations $x$ of some module, there is a set $\{\alpha_i \in \R\}_{i=0}^{d_dict}$ mostly 0 such that $x = \sum_{i=0}^{d_dict} \alpha_i b_i$. There are two dual problems here, one is to find such a familly, the other is, given a familly and a data point, find the $\alpha_i$.
 
-\paragraph{Notation} In the rest of this article, these $b_i$ will be unit vectors called features, and both $b_i$ and it's magnitude $\alpha_i$ will be identified under the notation $f_i$.
+\paragraph{Notation} In the rest of this work, these $b_i$ will be unit vectors called features, and both $b_i$ and it's magnitude $\alpha_i$ will be identified under the notation $f_i$.
 
-\paragraph{Autoencoders} People usually train sparse autoencoders - SAE - \citep{ng2011sparse} to solve both of these problems. The decoder serves as the dictionary, while the encoder is the sparse coding function.
+\paragraph{Autoencoders} People usually train sparse autoencoders (SAE) \citep{ng2011sparse} to solve both of these problems. The decoder serves as the dictionary, while the encoder is the sparse coding function.
 
 The majority of research in transformer interpretability uses one layer MLPs \citep{cunningham2023sparse, gao2024scaling} trained to learn the identity function with an added sparsity loss. \citet{rajamanoharan2024improving} proposed an improvement to this method by adding a gated mechanism to the MLPs.
 
-\citet{bushnaq2024using} introduced a change of basis called LIB that can be viewed as a linear autoencoder capturing functionally important features, though the decomposition is not exactly sparse. Any change of basis given by future research can be similarly used as a linear autoencoder.%`FUTURE`
+\citet{bushnaq2024using} introduced a change of basis called the \textit{Local Interaction Basis} (LIB) that can be viewed as a linear autoencoder capturing functionally important features, though the decomposition is not sparse. Any change of basis given by future research can be similarly used as a linear autoencoder.%`FUTURE`
 
-All of this work finds higly interpretable features.
+All of this work finds higly interpretable features, and is one direction in trying to find better geometric representations of model's latent space.
 
 \subsection{Circuit Discovery}
+\label{sec:circuit_discovery}
 
-Early work in vision models find related features across layers seeminly responsible for some behavior \citep{olah2020zoomCircuits}. This sparked interest in the community, and recent work has been done on both vision and language transformers.
+Early work in vision models find related features across layers seeminly responsible for some common behavior \citep{olah2020zoomCircuits}. This sparked interest in the community, and recent work has been done on both vision and language transformers to find circuits of model's components working together to implement some behavior.
 
 \citet{conmy2023automatedACDCCircuits} patches each edge with a baseline value. Edges are those of the complete computational graph, as defined by the original transformer architecture - between modules. They then compare the induced model to the unmodified one. Edges with an effect smaller than some threshold are removed. This is done for a specific task with it's associated dataset. However, this approach is very computationally expensive and doesn't scale well with model size.
 
 \citet{syed2023attributionCircuits} reused some gradient based attribution method by comparing the gradient to some patching direction in order to have a much more efficient method.
 
-Such methods based on whole modules are very coarse and aim at finding the role played by specific modules under a specific context. When applied to a general dataset to get the full computational graph - not only a task specific subgraph - they yield an almost complete graph of dependencies as computations in the model are entangled and each module implements a complex function involved in a lot of different behaviors. This motivates the use of more fine grained methods to disantangle the model's computation.
+Such methods based on whole modules are very coarse and aim at finding the role played by specific modules under a specific context. Thus, people started to try to disantangle the model's computation using more refined nodes to get a more interpretable representation.
 
-% DELETE (I don't think I will put this : ) - information flow : build the computational graph for example sequences, where nodes are heads, MLPs and residual streams. Can only get the frequency of activation of each module, so in the end they don't really build a graph. They define contribution of each module $m_1$'s output $x_1$ to any of its successor $m_2$'s output $x_2$ as follows. They first linearise the function of $m_2$ into $f$, and then look at how close $f(x_1)$ is to $x_2$. [TODO : speak about my experiments on making the same thing with different inner products and by linking directly modules, without residual stream checkpoints, and how it didn't work ? If using different attribution methods, it becomes AtP.]
+To this aim, \citet{oneill2024sparse} used SAE's trained specifically on the task under study, with a final graph still based on heads but using information flow through these disantangled features. \citet{he2024dictionaryCircuits} also used SAE's, building dependencies between features by linearising the model's computations, removing the need for patches.% or hiding it well enough indirectly in some computation-->
 
-\citet{oneill2024sparse} used SAE's trained specifically on the task under study to disantangle the computation and build computational graphs, still based on heads but using information flow through these disantangled features. \citet{he2024dictionaryCircuits} also used SAE's, building dependencies between features by linearising the model's computations, removing the need for patches.% or hiding it well enough indirectly in some computation-->
+\citet{marks2024sparseCircuits} also used sparse autoencoders to disantangle the model's computation. They used integrated gradients to get the contribution of each feature to the model's output, keeping only features with an attribution higher that some threshold. Their computational graph is however the complete graph between these selected features. They mention trying to attribute edges contributions too, but they do not use them in their ablation experiments.
 
-\citet{marks2024sparseCircuits} again used sparse autoencoders to disantangle the model's computation, and used integrated gradients to get the contribution of each feature to the model's output. Their computational graph is however the complete graph between these selected features, which, if applied to a general dataset, would simply yield the complete graph and the original model would be unchanged. They mention trying to attribute edges contributions too, but they never used them in their experiments.
-
-Some work also tried to use clever changes of basis, or linear autoencoders, to disantangle the model's computation. \citet{merullo2024talking} worked purely based on the weights of the model to link singular vecotrs of weight matrices as features. \citet{bushnaq2024using} introduced a change of basis called Local Interaction Basis (LIB) that is supposed to capture functionally important features and dependencies.
+Some work also tried to use clever changes of basis, or linear autoencoders, to disantangle the model's computation. \citet{merullo2024talking} worked purely based on the weights of the model to draw edges between singular vectors of weight matrices. \citet{bushnaq2024using} introduced a change of basis called Local Interaction Basis (LIB) that is supposed to capture functionally important features and dependencies.
 
 All these methods seem to be able to give interesting cherry picked explanations on toy models or tasks.
 
+\subsection{Parallels between neurosciences and mechanistic interpetability}
+\label{sec:parallels}
+
+TODO : modify this section once work has a bit more advanced, so I can say "blablabla nice parallel, and we actually tested this" instead of just "eh, random handwavy idea, please future work do it".
+
+The recently emerging field of mechanistic interpretability (MI) seems to have been rediscovering a lot of what neuroscientists have already been doing. We believe that settling on common definitions and frameworks can help both fields as they share a lot of similarities in trying to explain the inner workings of complex systems. Having common definitions can help having a clearer global view and more sorted ideas. In particular, it can be sometimes hard to follow what fundamental distinctions exist between all mechanistic interpretability studies with lack of clear nomenclature to unambiguously refer to common concepts. It can also facilitate potential bridges and collaborations, which we believe to be numerous. In particular, MI could could use neuroscience as a foundational body of work to build upon, and neuroscience could use MI to design experiments that could validate some frameworks of network science and analysis that might be hard to validate in an actual brain.
+
+We now give some examples of concepts and experiments that are extremely similar in both fields.
+
+In machine learning, \textit{functional segregation} corresponds to finding some interpretable feature that single handedly explains some behavior, through probing, SAEs or any other means. It could also correspond to finding some communities of neurons in a single module that are together responsible for some behavior. \citep{TODO} showed the existence of such communities in vision classifiers, although they did not try intervening on them.
+
+\textit{Functional integration} on the other hand would be to explain some behavior through \textit{circuit discovery}, with all three \textit{structural}, \textit{functional} and \textit{effective} connectivity having their equivalent.
+\begin{itemize}
+    \item[\textit{structural connectivity}] \citep{TODOclusterability} used raw weight matrices in MLPs and CNNs as \textit{structural} connections between canonical directions, also knwon as \textit{neurons}. \citep{merullo2024talking} worked based on singular decompositions of weight matrices to find \textit{structural} connections between their principal components in transformer models.
+    \item[\textit{functional connectivity}] \citep{TODOvision} used biclustering on activations across examples to find \textit{functionally} similar neurons in vision models.
+    \item[\textit{effective connectivity}] Most of the \textit{circuit discovery} literature builds computational graphs, or graphs of dependencies based on actual information flow across many example inputs. This seems to be the most popular framework in circuit discovery.
+\end{itemize}
+
+In both the brain and neural networks, the choice of the granularity of the nodes in the computational graph is crucial. In the brain, regions of interests can be defined by actual physical proximity which often corresond to functional proximity. In neural networks, there is no such thing. In transformer models, when people need low granularity, they usually take whole attention heads and MLP modules. This is unlikely to be be the best coarse unit of computation. We believe that introducing the term of \textit{regions of interest} in the field of MI can help people develop better ideas for grouping fine grained nodes into coarser blocks - for example by grouping together nodes identified as functionally similar in a fixed layer as in \citep{TODOvision}.
+
 \section{Method}
 
-\subsection{Building a computational graph}
+\subsection{Functional connectivity}
+
+TODO : mention the fundamental difference between functional and effective : functional *do not* imply causality and cannot define computational graphs. They can only be used to study the relationships between nodes.
+
+corr of act/attr
+
+used to build a graph not for getting a computational graph but a functional one, where node classification and grouping into blocks is what we care about.
+
+used for ROI definitions
+
+\subsection{Effective connectivity with integrated gradients}
+
+% TODO
+TODO : make the distinction between feature and region of interest, which both work exactly the same for this method. In fact, it is general (doit prod between grad & diff), and in the case of 1d features the dot product happens to simply be a product
+% TODO
 
 For all model's module $m$ - attention head, attention layer, MLP layer or residual stream (whole transformer block) - let $E_m : \R^{d_{model}} \rightarrow \R^{d_{dict}}$ and $D_m : \R^{d_{dict}} \rightarrow \R^{d_{model}}$ be an encoder and decoder pair. These can be an arbitrary autoencoder, from a linear change of basis to a gated SAE. Each of the canonical $d_{dict}$ dimensions of the dictionary will be called a feature, and the magnitude of the activation of this feature will be called the feature's activation. We chose these features as nodes for our computational graph, they are atomic functions in the grand scheme of compositions in the model. % litterally, as defined by our computational graph
 We add a sink node $y$ for the model's final output. To get the dependencies between these nodes, we use the integrated gradients attribution method as follows.
@@ -273,6 +279,8 @@ where $\gamma : t \in [0, 1] \rightarrow t \cdot f^m \in \R^{d_{dict}}$ is the l
 Then, let $\alpha$, $\beta$ be aggregation functions, typically among the $max$, $mean$ or $sum$ functions. We contract this expanded graph using $\alpha$, and aggregate graphs over many examples using $\beta$. For convenience of notation, we can include some thresholding or any variant thereof to get a sparser graph in these aggregation functions. Note that in practice, we typically threshold on the fly, during the construction of the expanded graph, for computational reasons.
 
 Please also note that the choice for $\beta$ is not trivial, both $mean$ and $max$ have their drawbacks. $mean$ presents the risk to put edges coresponding to rare but important behaviors under the threshold, while keeping unimportant but consistent edges across examples. $max$ on the other hand keeps any rare behaviors, but as integrated gradient might be noisy - especially with such baseline and path - the amount of noise might be too high and the graph of dependencies might be too overcomplete. Future work can investigate the choice of better attribution functions or further pruning on the final graph.% `FUTURE`
+
+\subsection{Validating ROIs and computational graphs}
 
 \subsection{Evaluating a computational graph}
 
@@ -299,6 +307,20 @@ Let $G$ be a computational graph built from a model $\mathcal{M}$. We will now e
     - This tells us if we can "remove" some harmful or unwanted behavior.
 
 \section{Experiments}
+
+ROIs and node ablation for behavioral control
+
+Vision :
+
+Toy CNN classifier, MNIST, other ? identify each class's "ROIs", ablate them, and see if the model still works on all other classes except this one.
+
+Maybe AEs : pair an AE's output with a classifier and measure how we can remove it's ability to generate certain classes by ablating some ROIs.
+
+Do that for transformers too and show that it is better than doing this with attention heads as nodes.
+
+Language :
+
+
 
 - SVD : empirical vs pure module weights : is it even close ? Which is more relevant ? Which's directions are more interpretable ?
     - This could be a paper of its own for some greedy people, but I think workshop paper is realistic for that... ? `FUTURE`
@@ -352,6 +374,9 @@ Let $G$ be a computational graph built from a model $\mathcal{M}$. We will now e
 
 - evolution across size, fractional isomorphism, ... `FUTURE`
 
+\section{limitations and future work}
+
+\section{Conclusion}
 
 \bibliographystyle{plainnat}
 \bibliography{references}

@@ -3,7 +3,7 @@ import random
 import torch as t
 import torch.nn.functional as F
 
-# TODO : use this in the data folder ?
+# TODO : RC task
 
 def load_examples(dataset, num_examples, model, seed=12, pad_to_length=None, length=None):
     examples = []

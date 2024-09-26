@@ -56,7 +56,7 @@ def y_effect(
                         submod.output[0][:] = dictionary.decode(upstream_act.act) + upstream_act.res
                     else:
                         submod.output = dictionary.decode(upstream_act.act) + upstream_act.res
-                    metrics.append(metric_fn(model, **metric_kwargs))
+                    metrics.append(metric_fn(model, metric_kwargs))
             metric = sum([m for m in metrics])
             metric.sum().backward(retain_graph=True)
 
@@ -248,7 +248,7 @@ def get_effect(
         effect_indices = t.tensor(
             [[downstream_feat for downstream_feat in downstream_features for _ in effect_indices[downstream_feat]],
             t.cat([effect_indices[downstream_feat] for downstream_feat in downstream_features], dim=0)]
-        ).to(device)
+        ).to(device).long()
         effect_values = t.cat([effect_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
 
         potential_upstream_features = effect_indices[1] # list of indices

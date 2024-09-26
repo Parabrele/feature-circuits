@@ -91,41 +91,6 @@ class LinearDictionary(Dictionary, nn.Module):
         else:
             return x_hat
 
-def whitening(cov):
-    """
-    x : Tensor
-        input of dimension (n, d)
-    """
-    U, Lambda, _ = t.svd(cov)
-    # if Lambda is below eps, set it to 0
-    eps = 1e-6
-    Lambda[abs(Lambda) < eps] = 0
-    Lambda_sqrt_inv = t.zeros(Lambda.shape[0], Lambda.shape[0], device=Lambda.device)
-    Lambda_sqrt_inv[
-        t.arange(Lambda.shape[0], device=Lambda.device)[Lambda != 0],
-        t.arange(Lambda.shape[0], device=Lambda.device)[Lambda != 0]
-    ] = 1 / t.sqrt(Lambda[Lambda != 0])
-    Lambda_sqrt = t.zeros(Lambda.shape[0], Lambda.shape[0], device=Lambda.device)
-    Lambda_sqrt[
-        t.arange(Lambda.shape[0], device=Lambda.device)[Lambda != 0],
-        t.arange(Lambda.shape[0], device=Lambda.device)[Lambda != 0]
-    ] = t.sqrt(Lambda[Lambda != 0])
-
-    W = U @ Lambda_sqrt_inv @ U.T
-    W_inv = U @ Lambda_sqrt @ U.T
-    return W, W_inv
-        
-class WhiteDict(LinearDictionary):
-    """
-    Just another name for a linear dictionary, but to distinguish it.
-    """
-    def __init__(self, activation_dim, mean, cov):
-        super().__init__(activation_dim, activation_dim)
-        W, W_inv = whitening(cov)
-        self.bias = nn.Parameter(mean)
-        self.E = nn.Parameter(W)
-        self.D = nn.Parameter(W_inv)
-
 class IdentityDict(Dictionary, nn.Module):
     """
     An identity dictionary, i.e. the identity function.

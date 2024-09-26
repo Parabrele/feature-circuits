@@ -9,6 +9,7 @@ from utils.graph_utils import get_mask, prune, get_n_nodes, get_n_edges, get_den
 # TODO : instead of clean and patch, give the buffer, to not re threshold for each batch.
 # TODO : separate this function into one that computes metrics given a mask graph, and
 #        one that gather all evaluations, not only faithfulness
+
 @torch.no_grad()
 def faithfulness(
         model,
@@ -65,6 +66,8 @@ def faithfulness(
     """
     if isinstance(thresholds, float):
         thresholds = [thresholds]
+    if patch is not None and ablation_fn is None:
+        ablation_fn = lambda x: x
     if patch is None and ablation_fn is None:
         if default_ablation == 'mean':
             ablation_fn = lambda x: x.mean(dim=(0, 1)).expand_as(x)
@@ -80,66 +83,57 @@ def faithfulness(
         
     results = {}
 
-    # get metric on original model
+    # get unmodified logits
     with model.trace(clean):
         if isinstance(model.output, tuple):
             clean_logits = model.output[0]
         else:
             clean_logits = model.output
-        clean_logits = clean_logits[torch.arange(metric_fn_kwargs['trg'][0].numel()), metric_fn_kwargs['trg'][0]].save()
-        if isinstance(metric_fn, dict):
-            metric = {}
-            for name, fn in metric_fn.items():
-                if name == "KL":
-                    metric[name] = fn(model, clean_logits=clean_logits, **metric_fn_kwargs).save()
-                else:
-                    metric[name] = fn(model, **metric_fn_kwargs).save()
-        else:
-            metric = metric_fn(model, **metric_fn_kwargs).save()
+        clean_logits = clean_logits.save()
     
-    if isinstance(metric, dict):
-        results['complete'] = {}
-        for name, value in metric.items():
-            results['complete'][name] = value.value.mean().item()
-    else:
-        results['complete'] = metric.value.mean().item()
+    # get metric on original model :
+    metric_fn_kwargs['clean_logits'] = clean_logits
+    results['complete'] = {}
+    with model.trace(clean):
+        for fn_name, fn in metric_fn.items():
+            results['complete'][fn_name] = fn(model, metric_fn_kwargs).save()
 
-    # get metric on empty graph
-    print("Circuit keys :", circuit[0].keys(), circuit[1].keys())
-    mask = get_mask(circuit, -1, threshold_on_nodes=node_ablation)
-    empty = run_graph(
-        model,
-        submodules,
-        sae_dict,
-        name_dict,
-        clean,
-        patch,
-        mask,
-        metric_fn,
-        metric_fn_kwargs,
-        ablation_fn,
-        clean_logits=clean_logits
-    )
-    results['empty'] = empty
+    # get metric on fully ablated model
+    results['empty'] = {}
+    if patch is None: patch = clean
+
+    with model.trace(patch):
+        submodule = submodules[-1]
+        x = submodule.output
+        if type(x.shape) == tuple:
+            x = x[0]
+        x_hat, f = sae_dict[submodule](x, output_features=True)
+        last_state = SparseAct(act=f, res=x - x_hat).save()
+    last_state = ablation_fn(last_state)
+    with model.trace(patch):
+        submodule = submodules[-1]
+        if isinstance(submodule.output, tuple):
+            submodule.output[0] = sae_dict[submodule].decode(last_state.act) + last_state.res
+        else:
+            submodule.output = sae_dict[submodule].decode(last_state.act) + last_state.res
+        
+        for fn_name, fn in metric_fn.items():
+            results['empty'][fn_name] = fn(model, metric_fn_kwargs).save()
 
     # get metric on thresholded graph
     for i, threshold in enumerate(thresholds):
-        print(f"Threshold {i+1}/{len(thresholds)} : {threshold}")
         results[threshold] = {}
 
         mask = get_mask(circuit, threshold, threshold_on_nodes=node_ablation)
-        #if not node_ablation:
         mask = (mask[0], prune(mask[1]))
 
         if get_graph_info:
-            results[threshold]['n_nodes'] = get_n_nodes(mask[1])
-            results[threshold]['n_edges'] = get_n_edges(mask[1])
-            print("n_nodes :", results[threshold]['n_nodes'], "n_edges :", results[threshold]['n_edges'])
-            results[threshold]['avg_deg'] = results[threshold]['n_edges'] / (results[threshold]['n_nodes'] if results[threshold]['n_nodes'] > 0 else 1)
-            results[threshold]['density'] = get_density(mask[1])
-            # TODO : results[threshold]['modularity'] = modularity, as in kaarel, as in modularity in NN paper, as in me
-            #        results[threshold]['z_score'] = Z_score(pruned)
-            
+            results[threshold]['n_nodes'] = get_n_nodes(mask[0] if node_ablation else mask[1])
+            results[threshold]['n_edges'] = get_n_edges((mask[0], mask[1]) if node_ablation else mask[1])
+            results[threshold]['avg_deg'] = 2 * results[threshold]['n_edges'] / (results[threshold]['n_nodes'] if results[threshold]['n_nodes'] > 0 else 1)
+            results[threshold]['density'] = get_density((mask[0], mask[1]) if node_ablation else mask[1])
+
+        # get dict metric_name -> metric_values
         threshold_result = run_graph(
             model,
             submodules,
@@ -151,9 +145,16 @@ def faithfulness(
             metric_fn,
             metric_fn_kwargs,
             ablation_fn,
-            clean_logits=clean_logits
         )
-        results[threshold]['metric'] = threshold_result
+        results[threshold]['faithfulness'] = {
+            k: v.value.mean().item() for k, v in threshold_result.items()
+        }
+
+        for k in threshold_result:
+            g = threshold_result[k].value
+            m = results['complete'][k].value
+            e = results['empty'][k].value
+            results[threshold]['faithfulness']['faithfulness_' + k] = ((g-e)/(m-e)).mean().item()
 
         # complement_result = run_graph(
         #     model,
@@ -168,21 +169,6 @@ def faithfulness(
         #     ablation_fn,
         #     complement=True,
         # ).mean().item()
-        # results[threshold]['metric_comp'] = complement_result
-
-        if isinstance(metric, dict):
-            results[threshold]['faithfulness'] = {}
-            for name, value in metric.items():
-                if "MRR" in name or "acc" in name:
-                    if results['complete'][name] == 0:
-                        results[threshold]['faithfulness'][name] = 1
-                    else:
-                        results[threshold]['faithfulness'][name] = threshold_result[name] / results['complete'][name]
-                elif name == "KL":
-                    results[threshold]['faithfulness'][name] = threshold_result[name]
-                else:
-                    results[threshold]['faithfulness'][name] = (threshold_result[name] - empty[name]) / (results['complete'][name] - empty[name])
-        else:
-            results[threshold]['faithfulness'] = (threshold_result - empty) / (metric - empty)
+        # results[threshold]['completeness'] = complement_result
 
     return results

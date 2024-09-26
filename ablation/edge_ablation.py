@@ -35,7 +35,6 @@ def run_graph(
         metric_fn_kwargs,
         ablation_fn,
         complement=False,
-        clean_logits=None,
     ):
     """
     model : nnsight model
@@ -103,7 +102,7 @@ def run_graph(
         # get downstream dict, output, ...
         downstream_dict = dictionaries[downstream]
         down_name = mod2name[downstream]
-        print(f"Computing {down_name}")
+        # print(f"Computing {down_name}")
         # TOD? : this surely can be replaced by a single call to trace, or none at all
         with model.trace(clean):
             if input_is_tuple[downstream]:
@@ -123,29 +122,23 @@ def run_graph(
         x_hat, f = downstream_dict(x, output_features=True)
         res = x - x_hat
 
-        print("Got x_hat and f")
+        # print("Got x_hat and f")
 
         # if downstream is embed, there is no upstream and the result stays unchanged
         if down_name == 'embed' or downstream == submodules[0]:
-            print("Embed or first layer")
+            # print("Embed or first layer")
             hidden_states[downstream] = SparseAct(act=f, res=res)
             continue
 
         # otherwise, we have to do the computation as the graph describes it, and each downstream
         # feature, including the res, is computed from a different set of upstream features
 
-        # TODO : this is wrong, I have to compute all features, even those who have no predecessors
-        # alive as it may be important that they are all asleep for this particular function
-        # However, it is computationally unreasonable to compute tens of thousands of forward passes,
-        # so until a better solution is found, I will do this.
-        # TODO : check that the result between this and all features being potentially alive are the same
-        #        or close enough on a few examples to validate this choice.
-        # TOD? : for features whose masks are all zeros, skip and keep only the patch state
-        
         potentially_alive = torch.zeros(f.shape[-1] + 1, device=f.device, dtype=torch.bool)
 
         for up_name in graph[down_name]:
             upstream = name2mod[up_name]
+            if upstream not in submodules:
+                continue
             mask = graph[down_name][up_name] # shape (f_down + 1, f_up + 1)
 
             upstream_hidden = hidden_states[upstream].act # shape (batch, seq_len, f_up)
@@ -153,17 +146,19 @@ def run_graph(
             upstream_hidden = upstream_hidden.abs().amax(dim=(0, 1)) # shape (f_up)
             up_nz = torch.cat([upstream_hidden > 0, torch.tensor([True], device=f.device)]) # shape (f_up + 1). Always keep the res feature alive
             
-            print("Number of potentially alive features upstream : ", up_nz.sum().item())
+            # print("Number of potentially alive features upstream : ", up_nz.sum().item())
             compiled_loop_pot_ali(mask.indices(), potentially_alive, up_nz)
 
         potentially_alive = potentially_alive.nonzero().squeeze(1)
-        print("Number of potentially alive features downstream : ", potentially_alive.size(0))
+        # print("Number of potentially alive features downstream : ", potentially_alive.size(0))
 
         f[...] = patch_states[downstream].act # shape (batch, seq_len, f_down)
         for f_ in potentially_alive:
             edge_ablated_input = torch.zeros(tuple(input_shape)).to(f.device)
             for up_name in graph[down_name]:
                 upstream = name2mod[up_name]
+                if upstream not in submodules:
+                    continue
                 upstream_dict = dictionaries[upstream]
                 
                 mask = graph[down_name][up_name][f_].to_dense() # shape (f_up + 1)
@@ -215,13 +210,11 @@ def run_graph(
         if isinstance(metric_fn, dict):
             metric = {}
             for name, fn in metric_fn.items():
-                if name == "KL":
-                    metric[name] = fn(model, clean_logits=clean_logits, **metric_fn_kwargs).save()
-                else:
-                    metric[name] = fn(model, **metric_fn_kwargs).save()
+                met = fn(model, metric_fn_kwargs).save()
+                metric[name] = met
         else:
-            metric = metric_fn(model, **metric_fn_kwargs).save()
+            raise ValueError("metric_fn must be a dict of functions")
 
-    if isinstance(metric, dict):
-        return {name : value.value.mean().item() for name, value in metric.items()}
-    return metric.value.mean().item()
+    # for name, value in metric.items():
+    #     value = value[torch.isfinite(value)]
+    return metric

@@ -20,10 +20,9 @@ def run_graph(
         metric_fn_kwargs,
         ablation_fn,
         complement=False,
-        clean_logits=None,
     ):
     if isinstance(mask, tuple):
-        print("In run graph, mask is a tuple with", mask[0].keys(), mask[1].keys())
+        #print("In run graph, mask is a tuple with", mask[0].keys())#, mask[1].keys())
         graph_nodes = mask[0]
     else:
         graph_nodes = mask
@@ -44,7 +43,6 @@ def run_graph(
         for submodule in submodules:
             submod_name = mod2name[submodule]
             dictionary = dictionaries[submodule]
-            print(graph_nodes.keys())
             submod_nodes = graph_nodes[submod_name].clone()
             x = submodule.output
             is_tuple = type(x.shape) == tuple
@@ -68,16 +66,15 @@ def run_graph(
         if isinstance(metric_fn, dict):
             metric = {}
             for name, fn in metric_fn.items():
-                if name == "KL":
-                    metric[name] = fn(model, clean_logits=clean_logits, **metric_fn_kwargs).save()
-                else:
-                    metric[name] = fn(model, **metric_fn_kwargs).save()
+                met = fn(model, metric_fn_kwargs).save()
+                metric[name] = met
         else:
-            metric = metric_fn(model, **metric_fn_kwargs).save()
+            raise ValueError("metric_fn must be a dict of functions")
 
-    if isinstance(metric, dict):
-        return {name : value.value.mean().item() for name, value in metric.items()}
-    return metric.value.mean().item()
+    # # remove absurd values first (inf, nan)
+    # for name, value in metric.items():
+    #     value[~t.isfinite(value)] = 0
+    return metric
 
 """
 Below is unmodified code from marks et al, for compatibility.

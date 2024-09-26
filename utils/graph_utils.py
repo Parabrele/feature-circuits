@@ -1,7 +1,7 @@
 import torch
 
 import networkx as nx
-import networkit as nk
+# import networkit as nk
 
 from utils.activation import SparseAct
 from utils.sparse_coo_helper import sparse_coo_maximum
@@ -65,11 +65,16 @@ def get_mask(graph, threshold, threshold_on_nodes=False):
         raise ValueError("expected a tuple of nodes and edges")
     
     # First threshold the nodes to know which to keep and discard
+    node_mask = None
     if has_nodes:
         node_mask = {}
         for module in nodes:
+            if module == 'y':
+                continue
             node_mask[module] = nodes[module].abs() > threshold
 
+    if edges is None:
+        return node_mask, None
     edge_mask = {}
 
     for upstream in edges:
@@ -105,8 +110,8 @@ def to_Digraph(circuit, discard_res=False, discard_y=False):
     """
     if isinstance(circuit, nx.DiGraph):
         return circuit
-    elif isinstance(circuit, nk.Graph):
-        return nk.nxadapter.nk2nx(circuit)
+    # elif isinstance(circuit, nk.Graph):
+    #     return nk.nxadapter.nk2nx(circuit)
     elif isinstance(circuit, tuple) or isinstance(circuit, dict):
         G = nx.DiGraph()
 
@@ -166,6 +171,8 @@ def prune(
     circuit : nx.DiGraph or dict of dict of sparse_coo tensors
     returns a new nx.DiGraph or dict of dict of sparse_coo tensors
     """
+    if circuit is None:
+        return None
     if isinstance(circuit, nx.DiGraph):
         return prune_nx(circuit)
     else:
@@ -310,36 +317,66 @@ def prune_nx(
 
     return G
 
-
 def get_n_nodes(G):
     if isinstance(G, nx.DiGraph):
         return G.number_of_nodes()
     elif isinstance(G, dict):
         n_nodes = 0
+        # if G is given as a dict of SparseAct : these are only the nodes
+        # if G is given as a dict of dict of sparse_coo tensors : these are the edges
+        is_edges = False
         for up in G:
-            up_nodes = None
-            for down in G[up]:
-                if down == 'y':
-                    nodes = G[up][down].indices()[0].unique()
-                else:
-                    nodes = G[up][down].indices()[1].unique()
-                if up_nodes is None:
-                    up_nodes = nodes
-                else:
-                    up_nodes = torch.cat([up_nodes, nodes])
-            n_nodes += up_nodes.unique().size(0)
-        return n_nodes
+            if isinstance(G[up], dict):
+                is_edges = True
+                break
+        if not is_edges:
+            for up in G:
+                n_nodes += G[up].to_tensor().sum().item()
+            return n_nodes
+        else:
+            for up in G:
+                up_nodes = None
+                for down in G[up]:
+                    if down == 'y':
+                        nodes = G[up][down].indices()[0].unique()
+                    else:
+                        nodes = G[up][down].indices()[1].unique()
+                    if up_nodes is None:
+                        up_nodes = nodes
+                    else:
+                        up_nodes = torch.cat([up_nodes, nodes])
+                n_nodes += up_nodes.unique().size(0)
+            return n_nodes
     else :
         raise ValueError("Unknown graph type")
 
 def get_n_edges(G):
+    if G is None:
+        return 0
     if isinstance(G, nx.DiGraph):
         return G.number_of_edges()
     elif isinstance(G, dict):
+        # if G is a dict of dict of sparse coo tensors, they contain the edges :
         n_edges = 0
         for up in G:
             for down in G[up]:
                 n_edges += G[up][down].values().size(0)
+        return n_edges
+    elif isinstance(G, tuple):
+        # if G is a tuple of nodes and edges, we consider that we are in the node ablation setting and the edge dict is only here to give the dependencies between layers.
+        n_edges = 0
+        nodes, edges = G
+        for up in edges:
+            for down in edges[up]:
+                if up == 'y':
+                    n_edges += nodes[down].to_tensor().sum().item()
+                    continue
+                elif down == 'y':
+                    n_edges += nodes[up].to_tensor().sum().item()
+                    continue
+                n_up = nodes[up].to_tensor().sum().item()
+                n_down = nodes[down].to_tensor().sum().item()
+                n_edges += n_up * n_down
         return n_edges
     else :
         raise ValueError("Unknown graph type")
@@ -358,13 +395,20 @@ def get_connected_components(G):
 
 def get_density(edges):
     # edges is a dict of dict of sparse_coo tensors
+    if edges is None:
+        return 0
     if isinstance(edges, nx.DiGraph):
         return nx.density(edges)
-    n_edges = 0
+    if isinstance(edges, tuple):
+        n_edges = get_n_edges(edges)
+        edges = edges[1]
+    else:
+        n_edges = 0
     max_edges = 0
     for up in edges:
         for down in edges[up]:
-            n_edges += edges[up][down].values().size(0)
+            if not isinstance(edges, tuple):
+                n_edges += edges[up][down].values().size(0)
             max_edges += edges[up][down].size(0) * (edges[up][down].size(1) if down != 'y' else 1)
     max_edges = max(max_edges, 1)
     return n_edges / max_edges

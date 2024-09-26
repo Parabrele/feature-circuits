@@ -601,14 +601,14 @@ def run_checking_ablation(cnn_model, data_loader, device, feature_labels, all_la
     checking_accuracy = torch.tensor([0.99, 0.97, 0.98, 0.95, 0.91, 0.85, 0.89, 0.9, 0.92, 0.88, 0.82, 0.85, 0.81, 0.805, 0.7, 0.81, 0.08])
     plt.plot(checking_thresholds, checking_accuracy, label="Lu et al. - Biclusters")
 
-    plt.xlabel("ablated percentage")
+    plt.xlabel("ablated proportion")
     plt.ylabel("Accuracy")
     plt.legend()
     plt.savefig(scratch + 'ablation_per_sample' + suffix + '.png')
     plt.close()
 
     plt.plot(thresholds, completeness.cpu().numpy())
-    plt.xlabel("untouched percentage")
+    plt.xlabel("untouched proportion")
     plt.ylabel("Accuracy")
     plt.savefig(scratch + 'completeness_per_sample' + suffix + '.png')
     plt.close()

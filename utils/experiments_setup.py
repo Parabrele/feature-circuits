@@ -4,13 +4,14 @@ from nnsight import LanguageModel
 from nnsight.models.UnifiedTransformer import UnifiedTransformer
 from utils.dictionary import IdentityDict, LinearDictionary, AutoEncoder
 
-def load_model_and_modules(device, unified=False, model_name="EleutherAI/pythia-70m-deduped"):
+def load_model_and_modules(device, unified=True, model_name="EleutherAI/pythia-70m-deduped"):
     if unified:
         model = UnifiedTransformer(
             model_name,
             device=device,
             processing=False,
         )
+        model.device = model.cfg.device
         model.tokenizer.padding_side = 'left'
 
         embed = model.embed

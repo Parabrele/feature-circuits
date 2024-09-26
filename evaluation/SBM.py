@@ -1,25 +1,7 @@
 """
-https://arxiv.org/pdf/1705.10225
-
-simple graphs without self loops :
-    edges \in {0, 1} : (4)
-multi graphs :
-    edges \in N (5)
-
-In the sparse limit (p/lambda = O(1/N), N the number of nodes), ln P(A|p/lambda, b) are the same
-
-poisson distribution to generate edges :
-Also has the same log probability, and might be nicer to use. All these models therefore generate the same networks in the sparse limit.
-
-/!\ TODO : all of this seems to work if we are in the sparse case ! Make sure that it is the case !
-
 https://journals.aps.org/pre/pdf/10.1103/PhysRevE.97.012306 and https://arxiv.org/pdf/1404.0431 :
 weights are very important to keep. In fig 3 he fits on a covariance matrix and compare the infered distribution to that of shuffled data (with same empirical distribution)
 TODO : how are fig 2 and 3 c fits generated ?
-
-For correlation matrix : see sec 3.B of https://journals.aps.org/pre/pdf/10.1103/PhysRevE.97.012306.
-    - [-1, 1] -> [-inf, inf] : 2 arctanh(x) = ln((1+x)/(1-x)) (fisher's formula)
-    - When randomly shuffling the correlation matrix, only a single group is found. Even though there is still a bimodal distribution of the correlation coefficients, it is uncorrelated with any partition of the deputies, and the best fit is a normal distribution.
 """
 
 import numpy as np
@@ -109,37 +91,6 @@ def fit_nested_SBM(cov, already_correlation=False, threshold=None, sparsity_thre
     state.print_summary()
     return state
 
-"""
-Script to test conversion from nx to gt graph :
-
-import networkx as nx
-import graph_tool.all as gt
-
-g = nx.Graph()
-g.add_edge("a", "b")
-g.add_edge("a", "c")
-g.add_edge("b", "c")
-g.add_edge("gertrude44du69", "cbastienxx")
-g.add_edge(45, 695)
-g.add_edge(45, "gertrude44du69")
-
-g_gt = gt.Graph(directed=False)
-g_gt.add_edge_list(g.edges)
-print(g_gt.get_vertices())
-print(g_gt.get_edges())
-print(g_gt)
-
-This does not work, we need to convert the nodes to integers first.
-
-rename_nodes = {node : i for i, node in enumerate(g.nodes)}
-renamed_g = nx.relabel_nodes(g, rename_nodes)
-g_gt = gt.Graph(directed=False)
-g_gt.add_edge_list(renamed_g.edges)
-print(g_gt.get_vertices())
-print(g_gt.get_edges())
-print(g_gt)
-"""
-
 def plot_hierarchy(state, save_path=None):
     """
     Use gt.draw_hierarchy.
@@ -211,7 +162,6 @@ def plot_block_corr(cov, state, already_correlation=False, save_path=None):
     else:
         raise ValueError("No save path provided.")
 
-
 def plot_block_prob(cov, g, state, already_correlation=False, save_path=None):
     """
     Same plot as before, but replace the correlation by the value of the probability of an edge between the two blocks.
@@ -223,3 +173,34 @@ def plot_distribution_fit(cov, g, state, already_correlation=False, save_path=No
     Plot the distribution of covariances and the prediced values from the SBM.
     """
     raise NotImplementedError
+
+"""
+Script to test conversion from nx to gt graph :
+
+import networkx as nx
+import graph_tool.all as gt
+
+g = nx.Graph()
+g.add_edge("a", "b")
+g.add_edge("a", "c")
+g.add_edge("b", "c")
+g.add_edge("gertrude44du69", "cbastienxx")
+g.add_edge(45, 695)
+g.add_edge(45, "gertrude44du69")
+
+g_gt = gt.Graph(directed=False)
+g_gt.add_edge_list(g.edges)
+print(g_gt.get_vertices())
+print(g_gt.get_edges())
+print(g_gt)
+
+This does not work, we need to convert the nodes to integers first.
+
+rename_nodes = {node : i for i, node in enumerate(g.nodes)}
+renamed_g = nx.relabel_nodes(g, rename_nodes)
+g_gt = gt.Graph(directed=False)
+g_gt.add_edge_list(renamed_g.edges)
+print(g_gt.get_vertices())
+print(g_gt.get_edges())
+print(g_gt)
+"""

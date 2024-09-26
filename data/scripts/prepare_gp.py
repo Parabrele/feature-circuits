@@ -12,12 +12,11 @@ def parse_args():
     
     parser.add_argument("--names", "-n", default="/home/pyllm/dhimoila/feature-circuits-1/data/helper_files/names.json")
     parser.add_argument("--templates", "-t", default="/home/pyllm/dhimoila/feature-circuits-1/data/helper_files/templates-gp.json")
-    parser.add_argument("--train", "-tr", default=150, type=int)
-    parser.add_argument("--validation", "-va", default=150, type=int)
-    parser.add_argument("--test", "-tt", default=1800, type=int)
+    parser.add_argument("--train", "-tr", default=200, type=int)
+    parser.add_argument("--validation", "-va", default=200, type=int)
+    parser.add_argument("--test", "-tt", default=1700, type=int)
     parser.add_argument("--out-path", "-o", default="/home/pyllm/dhimoila/feature-circuits-1/data/datasets/gp")
     parser.add_argument("--tokenizer", default="gpt2")
-    parser.add_argument("--enforce-single-token", "-e", action="store_true")
     parser.add_argument("--split-by-template", "-b", action="store_true")
     parser.add_argument("--seed", "-s", type=int, default=42)
 
@@ -29,7 +28,7 @@ def parse_args():
     return args
 
 def is_single_token(tokenizer, token):
-    return len(tokenizer.encode(token)) == 1
+    return (len(tokenizer.encode(token)) == 1 and len(tokenizer.encode(" " + token)) == 1)
 
 def main():
     args = parse_args()
@@ -40,9 +39,8 @@ def main():
     girls = names["girls"]
     boys = names["boys"]
 
-    if args.enforce_single_token:
-        girls = [girl for girl in girls if is_single_token(tokenizer, girl)]
-        boys = [boy for boy in boys if is_single_token(tokenizer, boy)]
+    girls = [girl for girl in girls if is_single_token(tokenizer, girl)]
+    boys = [boy for boy in boys if is_single_token(tokenizer, boy)]
 
     # Equalize the numbers of boys and girls
     l = min(len(boys), len(girls))
